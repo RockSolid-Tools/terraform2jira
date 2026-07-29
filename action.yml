@@ -1,0 +1,25 @@
+name: 'Terraform to Business Translator'
+description: 'Reads a Terraform plan (tfplan.json), extracts the resources that will change and sends them to the Business Translator backend using an OIDC token.'
+author: 'terraform2jira'
+
+branding:
+  icon: 'file-text'
+  color: 'purple'
+
+inputs:
+  plan_path:
+    description: 'Path to the Terraform plan JSON file (generated with `terraform show -json tfplan > tfplan.json`).'
+    required: false
+    default: 'tfplan.json'
+  api_url:
+    description: 'URL of the Business Translator backend endpoint that receives the summarized plan.'
+    required: false
+    default: 'https://terraform2jira-backend.vercel.app/api/analyze'
+  audience:
+    description: 'OIDC audience for the requested token. Must match the OIDC_AUDIENCE configured in the backend.'
+    required: false
+    default: 'https://terraform2jira-backend.vercel.app'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'

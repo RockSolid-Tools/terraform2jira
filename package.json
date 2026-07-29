@@ -1,0 +1,23 @@
+{
+  "name": "terraform2jira",
+  "version": "1.0.0",
+  "description": "GitHub Action that summarizes a Terraform plan and sends it to the Business Translator backend using an OIDC token.",
+  "main": "index.js",
+  "scripts": {
+    "build": "ncc build index.js -o dist"
+  },
+  "keywords": [
+    "terraform",
+    "github-actions",
+    "oidc"
+  ],
+  "author": "terraform2jira",
+  "license": "MIT",
+  "dependencies": {
+    "@actions/core": "^1.11.1",
+    "@actions/http-client": "^2.2.3"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "^0.38.3"
+  }
+}
