@@ -26,4 +26,4 @@ jobs:
         uses: ./
         with:
           plan_path: tfplan.json
-          api_url: https://terraform2jira-backend-git-feature-auth-analyze-rock-solid1.vercel.app/api/analyze
+          # api_url: https://terraform2jira-backend-git-feature-auth-analyze-rock-solid1.vercel.app/api/analyze
