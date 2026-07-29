@@ -27595,6 +27595,10 @@ async function run() {
             resource_changes: changedResources,
         };
 
+        // Expose the reduced plan for debugging (log + step output)
+        core.info(`Reduced plan sent to backend:\n${JSON.stringify(payload, null, 2)}`);
+        core.setOutput('reduced_plan', JSON.stringify(payload));
+
         const idToken = await core.getIDToken(audience);
 
         const httpClient = new HttpClient('terraform2jira-action');
@@ -27610,6 +27614,16 @@ async function run() {
         }
 
         core.info(`Plan summary sent successfully (status ${statusCode}).`);
+
+        // Expose the backend response for debugging (log + output + job summary)
+        const result = response.result;
+        core.info(`Backend response:\n${JSON.stringify(result, null, 2)}`);
+        core.setOutput('response', JSON.stringify(result));
+
+        await core.summary
+            .addHeading('Terraform → Business Translator')
+            .addCodeBlock(JSON.stringify(result, null, 2), 'json')
+            .write();
     } catch (error) {
         core.setFailed(error.message);
     }

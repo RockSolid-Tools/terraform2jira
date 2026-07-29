@@ -20,6 +20,12 @@ inputs:
     required: false
     default: 'https://terraform2jira-backend.vercel.app'
 
+outputs:
+  reduced_plan:
+    description: 'The reduced Terraform plan (only changing resources) sent to the backend.'
+  response:
+    description: 'JSON response returned by the backend.'
+
 runs:
   using: 'node20'
   main: 'dist/index.js'

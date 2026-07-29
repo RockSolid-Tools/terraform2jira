@@ -13,17 +13,59 @@ jobs:
 
       - name: Crear tfplan.json dummy
         run: |
-          echo '{
+          cat > tfplan.json <<'EOF'
+          {
             "format_version": "1.2",
             "terraform_version": "1.9.0",
             "resource_changes": [
-              { "address": "aws_s3_bucket.demo",
-                "change": { "actions": ["create"] } }
+              {
+                "address": "aws_s3_bucket.logs",
+                "type": "aws_s3_bucket",
+                "name": "logs",
+                "provider_name": "registry.terraform.io/hashicorp/aws",
+                "change": { "actions": ["create"] }
+              },
+              {
+                "address": "aws_iam_role.app",
+                "type": "aws_iam_role",
+                "name": "app",
+                "provider_name": "registry.terraform.io/hashicorp/aws",
+                "change": { "actions": ["update"] }
+              },
+              {
+                "address": "aws_instance.legacy",
+                "type": "aws_instance",
+                "name": "legacy",
+                "provider_name": "registry.terraform.io/hashicorp/aws",
+                "change": { "actions": ["delete"] }
+              },
+              {
+                "address": "aws_db_instance.main",
+                "type": "aws_db_instance",
+                "name": "main",
+                "provider_name": "registry.terraform.io/hashicorp/aws",
+                "change": { "actions": ["delete", "create"] }
+              },
+              {
+                "address": "aws_vpc.main",
+                "type": "aws_vpc",
+                "name": "main",
+                "provider_name": "registry.terraform.io/hashicorp/aws",
+                "change": { "actions": ["no-op"] }
+              }
             ]
-          }' > tfplan.json
+          }
+          EOF
 
       - name: Ejecutar la Action (referencia local)
+        id: translate
         uses: ./
         with:
           plan_path: tfplan.json
           # api_url: https://terraform2jira-backend-git-feature-auth-analyze-rock-solid1.vercel.app/api/analyze
+
+      - name: Ver plan reducido (debug)
+        env:
+          REDUCED_PLAN: ${{ steps.translate.outputs.reduced_plan }}
+        run: echo "$REDUCED_PLAN" | jq .
+
