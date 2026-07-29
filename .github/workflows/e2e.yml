@@ -1,0 +1,29 @@
+name: E2E Test
+on: workflow_dispatch
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Crear tfplan.json dummy
+        run: |
+          echo '{
+            "format_version": "1.2",
+            "terraform_version": "1.9.0",
+            "resource_changes": [
+              { "address": "aws_s3_bucket.demo",
+                "change": { "actions": ["create"] } }
+            ]
+          }' > tfplan.json
+
+      - name: Ejecutar la Action (referencia local)
+        uses: ./
+        with:
+          plan_path: tfplan.json
+          api_url: https://terraform2jira-backend-git-feature-auth-analyze-rock-solid1.vercel.app/api/analyze
