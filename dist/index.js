@@ -89,6 +89,7 @@ module.exports = { buildMarkdown, upsertComment };
 // from the business analysis and posts it to the issue's comment endpoint.
 
 const SEVERITY_EMOJI = { low: '🟢', medium: '🟡', high: '🟠', critical: '🔴' };
+const MARKER = 'Posted by terraform2jira';
 
 // Extracts unique Jira issue keys (e.g. "PROJ-123") from a text.
 // When projectKeys is a non-empty array, only keys with those project prefixes
@@ -165,17 +166,34 @@ function buildAdf(analysis) {
         content.push(bulletList(analysis.recommendations.map((rec) => textNode(rec))));
     }
 
+    // Footer doubles as the marker used to find and update this comment on later runs
+    content.push({ type: 'rule' });
+    content.push({
+        type: 'paragraph',
+        content: [{ type: 'text', text: MARKER, marks: [{ type: 'em' }] }],
+    });
+
     return { version: 1, type: 'doc', content };
 }
 
-// Posts the ADF comment to the Jira issue. Throws on non-2xx responses.
-async function postComment(httpClient, { baseUrl, email, apiToken, issueKey, adf }) {
-    const url = `${baseUrl.replace(/\/+$/, '')}/rest/api/3/issue/${issueKey}/comment`;
+// Upserts the ADF comment on the Jira issue: updates the bot's previous comment
+// (found by the marker footer) or creates a new one. Throws on non-2xx responses.
+async function upsertComment(httpClient, { baseUrl, email, apiToken, issueKey, adf }) {
+    const base = baseUrl.replace(/\/+$/, '');
     const auth = Buffer.from(`${email}:${apiToken}`).toString('base64');
+    const headers = { Authorization: `Basic ${auth}` };
 
-    const response = await httpClient.postJson(url, { body: adf }, {
-        Authorization: `Basic ${auth}`,
-    });
+    const listUrl = `${base}/rest/api/3/issue/${issueKey}/comment?orderBy=-created&maxResults=50`;
+    const listRes = await httpClient.getJson(listUrl, headers);
+    const comments = (listRes.result && listRes.result.comments) || [];
+    const existing = comments.find((comment) => JSON.stringify(comment.body || '').includes(MARKER));
+
+    const url = existing
+        ? `${base}/rest/api/3/issue/${issueKey}/comment/${existing.id}`
+        : `${base}/rest/api/3/issue/${issueKey}/comment`;
+    const response = existing
+        ? await httpClient.putJson(url, { body: adf }, headers)
+        : await httpClient.postJson(url, { body: adf }, headers);
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
         throw new Error(`Jira responded with status ${response.statusCode}: ${JSON.stringify(response.result)}`);
@@ -184,7 +202,7 @@ async function postComment(httpClient, { baseUrl, email, apiToken, issueKey, adf
     return response.result;
 }
 
-module.exports = { extractIssueKeys, buildAdf, postComment };
+module.exports = { extractIssueKeys, buildAdf, upsertComment };
 
 
 /***/ }),
@@ -317,7 +335,8 @@ async function deliver(name, enabled, fn, failOnError) {
 }
 
 // Distribution phase: resolve the shared context once, then dispatch the analysis
-// to every configured channel independently.
+// to every configured channel independently. Only runs for fresh analyses; cached
+// replays are short-circuited earlier since every channel was already delivered.
 async function distribute(analysis, httpClient, event) {
     const failOnError = core.getInput('fail_on_error', { required: false }) === 'true';
 
@@ -342,12 +361,12 @@ async function distribute(analysis, httpClient, event) {
         repo,
     };
 
-    // 1) Jira (post to every resolved issue key, each independent)
+    // 1) Jira (upsert to every resolved issue key, each independent)
     await deliver('Jira', jiraActive, async () => {
         const adf = jira.buildAdf(analysis);
         for (const key of issueKeys) {
             try {
-                await jira.postComment(httpClient, { ...jiraCfg, issueKey: key, adf });
+                await jira.upsertComment(httpClient, { ...jiraCfg, issueKey: key, adf });
                 core.info(`Posted analysis to Jira issue ${key}.`);
             } catch (error) {
                 if (failOnError) {
@@ -394,7 +413,9 @@ async function run() {
 
         core.info(`Backend response:\n${JSON.stringify(result, null, 2)}`);
 
-        if (result && result.analysis) {
+        if (result.metadata && result.metadata.cached) {
+            core.info('Cached result (idempotent replay): channels already notified on the first run; skipping delivery.');
+        } else if (result.analysis) {
             await distribute(result.analysis, httpClient, readEvent());
         }
 
