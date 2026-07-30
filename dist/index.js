@@ -38,7 +38,7 @@ function buildMarkdown(analysis, context) {
     }
 
     if (context && context.jiraLink) {
-        lines.push('', `[View ticket in Jira](${context.jiraLink})`);
+        lines.push('', `🔗 [View ticket in Jira](${context.jiraLink})`);
     }
 
     return lines.join('\n');
@@ -170,7 +170,11 @@ function buildAdf(analysis) {
     content.push({ type: 'rule' });
     content.push({
         type: 'paragraph',
-        content: [{ type: 'text', text: MARKER, marks: [{ type: 'em' }] }],
+        content: [{
+            type: 'text',
+            text: `${MARKER} • updated ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC`,
+            marks: [{ type: 'em' }],
+        }],
     });
 
     return { version: 1, type: 'doc', content };
