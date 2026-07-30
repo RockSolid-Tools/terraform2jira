@@ -27577,13 +27577,21 @@ async function run() {
             ? plan.resource_changes
             : [];
 
-        const changedResources = resourceChanges.filter((resource) => {
-            const actions = resource.change && resource.change.actions;
-            if (!Array.isArray(actions)) {
-                return false;
-            }
-            return !(actions.length === 1 && actions[0] === 'no-op');
-        });
+        const changedResources = resourceChanges
+            .filter((resource) => {
+                const actions = resource.change && resource.change.actions;
+                if (!Array.isArray(actions)) {
+                    return false;
+                }
+                const onlyAction = actions.length === 1 ? actions[0] : null;
+                return onlyAction !== 'no-op' && onlyAction !== 'read';
+            })
+            .map((resource) => ({
+                address: resource.address,
+                type: resource.type,
+                name: resource.name,
+                change: { actions: resource.change.actions },
+            }));
 
         core.info(
             `Found ${changedResources.length} changing resource(s) out of ${resourceChanges.length}.`

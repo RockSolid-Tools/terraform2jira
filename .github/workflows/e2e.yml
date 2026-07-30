@@ -40,7 +40,19 @@ jobs:
                 "address": "aws_db_instance.main",
                 "type": "aws_db_instance",
                 "name": "main",
-                "change": { "actions": ["delete", "create"] }
+                "change": {
+                  "actions": ["delete", "create"],
+                  "before": { "password": "LEAK_BEFORE_SUPER_SECRET_123" },
+                  "after": { "password": "LEAK_AFTER_SUPER_SECRET_456" },
+                  "before_sensitive": { "password": true },
+                  "after_sensitive": { "password": true }
+                }
+              },
+              {
+                "address": "data.aws_secretsmanager_secret.existing",
+                "type": "aws_secretsmanager_secret",
+                "name": "existing",
+                "change": { "actions": ["read"] }
               },
               {
                 "address": "aws_vpc.main",
