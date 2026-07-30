@@ -19,6 +19,36 @@ inputs:
     description: 'OIDC audience for the requested token. Must match the OIDC_AUDIENCE configured in the backend.'
     required: false
     default: 'https://terraform2jira-backend.vercel.app'
+  jira_base_url:
+    description: 'Base URL of your Jira Cloud site (e.g. https://your-company.atlassian.net). Leave empty to disable the Jira integration.'
+    required: false
+  jira_email:
+    description: 'Atlassian account email used for Jira REST API basic auth.'
+    required: false
+  jira_api_token:
+    description: 'Jira API token (https://id.atlassian.com/manage-profile/security/api-tokens).'
+    required: false
+  jira_issue_key:
+    description: 'Explicit Jira issue key (e.g. PROJ-123). If empty, it is parsed from the pull request title.'
+    required: false
+  jira_project_keys:
+    description: 'Comma-separated Jira project prefixes (e.g. "PROJ,CORE") to scope automatic key extraction and avoid false positives. Optional.'
+    required: false
+  pr_comment:
+    description: 'Set to "true" to publish/update the business summary as a comment on the pull request.'
+    required: false
+    default: 'false'
+  github_token:
+    description: 'Token used to post the pull request comment (defaults to the workflow GITHUB_TOKEN). Requires pull-requests: write.'
+    required: false
+    default: ${{ github.token }}
+  slack_webhook_url:
+    description: 'Slack Incoming Webhook URL. If provided, the analysis is posted to Slack. Leave empty to disable.'
+    required: false
+  fail_on_error:
+    description: 'Set to "true" to fail the job if any channel delivery (Jira/Slack/PR) fails. Defaults to non-fatal warnings.'
+    required: false
+    default: 'false'
 
 outputs:
   reduced_plan:

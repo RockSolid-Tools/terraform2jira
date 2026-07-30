@@ -1,6 +1,519 @@
 /******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
+/***/ 6681:
+/***/ ((module) => {
+
+// GitHub PR comment integration: renders the business analysis as Markdown and
+// upserts a single bot comment on the pull request (no thread spam).
+
+const MARKER = '<!-- terraform2jira -->';
+const SEVERITY_EMOJI = { low: '🟢', medium: '🟡', high: '🟠', critical: '🔴' };
+
+function buildMarkdown(analysis, context) {
+    const severity = String(analysis.severity || 'unknown').toLowerCase();
+    const lines = [
+        '### 🗿 Terraform → Business Impact',
+        '',
+        analysis.summary || '',
+        '',
+        `**Severity:** ${SEVERITY_EMOJI[severity] || ''} ${severity}  |  **Cost impact:** ${analysis.cost_impact || 'unknown'}`,
+    ];
+
+    if (Array.isArray(analysis.resources) && analysis.resources.length) {
+        lines.push('', '**Resources**');
+        analysis.resources.forEach((r) => {
+            lines.push(`- \`${r.address}\` (${r.action}): ${r.business_impact || ''}`);
+        });
+    }
+
+    if (Array.isArray(analysis.risks) && analysis.risks.length) {
+        lines.push('', '**Risks**');
+        analysis.risks.forEach((r) => lines.push(`- ${r}`));
+    }
+
+    if (Array.isArray(analysis.recommendations) && analysis.recommendations.length) {
+        lines.push('', '**Recommendations**');
+        analysis.recommendations.forEach((r) => lines.push(`- ${r}`));
+    }
+
+    if (context && context.jiraLink) {
+        lines.push('', `[View ticket in Jira](${context.jiraLink})`);
+    }
+
+    return lines.join('\n');
+}
+
+function apiHeaders(token) {
+    return {
+        Authorization: `token ${token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'terraform2jira-action',
+    };
+}
+
+// Finds the existing bot comment (by marker) and updates it, or creates a new one.
+async function upsertComment(httpClient, { token, repo, prNumber, body }) {
+    const base = process.env.GITHUB_API_URL || 'https://api.github.com';
+    const headers = apiHeaders(token);
+    const fullBody = `${body}\n\n${MARKER}`;
+
+    const listUrl = `${base}/repos/${repo}/issues/${prNumber}/comments?per_page=100`;
+    const listRes = await httpClient.getJson(listUrl, headers);
+    const existing = Array.isArray(listRes.result)
+        ? listRes.result.find((comment) => comment.body && comment.body.includes(MARKER))
+        : null;
+
+    const url = existing
+        ? `${base}/repos/${repo}/issues/comments/${existing.id}`
+        : `${base}/repos/${repo}/issues/${prNumber}/comments`;
+
+    const response = existing
+        ? await httpClient.patchJson(url, { body: fullBody }, headers)
+        : await httpClient.postJson(url, { body: fullBody }, headers);
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw new Error(`GitHub responded with status ${response.statusCode}`);
+    }
+}
+
+module.exports = { buildMarkdown, upsertComment };
+
+
+/***/ }),
+
+/***/ 8446:
+/***/ ((module) => {
+
+// Jira Cloud integration: builds an Atlassian Document Format (ADF) comment
+// from the business analysis and posts it to the issue's comment endpoint.
+
+const SEVERITY_EMOJI = { low: '🟢', medium: '🟡', high: '🟠', critical: '🔴' };
+
+// Extracts unique Jira issue keys (e.g. "PROJ-123") from a text.
+// When projectKeys is a non-empty array, only keys with those project prefixes
+// match, which avoids false positives like "UTF-8" or "HTTP-2".
+function extractIssueKeys(text, projectKeys) {
+    if (!text) {
+        return [];
+    }
+    const prefixes = Array.isArray(projectKeys) ? projectKeys.filter(Boolean) : [];
+    const pattern = prefixes.length
+        ? new RegExp(`\\b(?:${prefixes.join('|')})-\\d+\\b`, 'g')
+        : /\b[A-Z][A-Z0-9]+-\d+\b/g;
+    return [...new Set(text.match(pattern) || [])];
+}
+
+function textNode(value) {
+    return { type: 'text', text: String(value) };
+}
+
+function strongNode(value) {
+    return { type: 'text', text: String(value), marks: [{ type: 'strong' }] };
+}
+
+function paragraph(children) {
+    return { type: 'paragraph', content: Array.isArray(children) ? children : [children] };
+}
+
+function heading(level, value) {
+    return { type: 'heading', attrs: { level }, content: [textNode(value)] };
+}
+
+function bulletList(itemsContent) {
+    return {
+        type: 'bulletList',
+        content: itemsContent.map((children) => ({
+            type: 'listItem',
+            content: [paragraph(children)],
+        })),
+    };
+}
+
+// Builds the ADF document representing the analysis.
+function buildAdf(analysis) {
+    const content = [heading(3, '🗿 Terraform → Business Impact')];
+
+    if (analysis.summary) {
+        content.push(paragraph(textNode(analysis.summary)));
+    }
+
+    const severity = String(analysis.severity || 'unknown').toLowerCase();
+    content.push(paragraph([
+        strongNode('Severity: '),
+        textNode(`${SEVERITY_EMOJI[severity] || ''} ${severity}`),
+        textNode('    |    '),
+        strongNode('Cost impact: '),
+        textNode(analysis.cost_impact || 'unknown'),
+    ]));
+
+    if (Array.isArray(analysis.resources) && analysis.resources.length) {
+        content.push(heading(4, 'Resources'));
+        content.push(bulletList(analysis.resources.map((resource) => ([
+            strongNode(`${resource.address} (${resource.action}): `),
+            textNode(resource.business_impact || ''),
+        ]))));
+    }
+
+    if (Array.isArray(analysis.risks) && analysis.risks.length) {
+        content.push(heading(4, 'Risks'));
+        content.push(bulletList(analysis.risks.map((risk) => textNode(risk))));
+    }
+
+    if (Array.isArray(analysis.recommendations) && analysis.recommendations.length) {
+        content.push(heading(4, 'Recommendations'));
+        content.push(bulletList(analysis.recommendations.map((rec) => textNode(rec))));
+    }
+
+    return { version: 1, type: 'doc', content };
+}
+
+// Posts the ADF comment to the Jira issue. Throws on non-2xx responses.
+async function postComment(httpClient, { baseUrl, email, apiToken, issueKey, adf }) {
+    const url = `${baseUrl.replace(/\/+$/, '')}/rest/api/3/issue/${issueKey}/comment`;
+    const auth = Buffer.from(`${email}:${apiToken}`).toString('base64');
+
+    const response = await httpClient.postJson(url, { body: adf }, {
+        Authorization: `Basic ${auth}`,
+    });
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw new Error(`Jira responded with status ${response.statusCode}: ${JSON.stringify(response.result)}`);
+    }
+
+    return response.result;
+}
+
+module.exports = { extractIssueKeys, buildAdf, postComment };
+
+
+/***/ }),
+
+/***/ 214:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const fs = __nccwpck_require__(9896);
+const core = __nccwpck_require__(7484);
+const { HttpClient } = __nccwpck_require__(4844);
+const jira = __nccwpck_require__(8446);
+const slack = __nccwpck_require__(7288);
+const github = __nccwpck_require__(6681);
+
+// Reads the GitHub event payload (pull request title, author, number, etc.).
+function readEvent() {
+    const eventPath = process.env.GITHUB_EVENT_PATH;
+    if (!eventPath || !fs.existsSync(eventPath)) {
+        return {};
+    }
+    try {
+        return JSON.parse(fs.readFileSync(eventPath, 'utf8'));
+    } catch (error) {
+        return {};
+    }
+}
+
+// Builds the reduced, sanitized payload sent to the backend (DLP applied here):
+// only non-sensitive metadata leaves the runner, and no-op/read resources are dropped.
+function buildReducedPayload(plan) {
+    const resourceChanges = Array.isArray(plan.resource_changes) ? plan.resource_changes : [];
+    const changedResources = resourceChanges
+        .filter((resource) => {
+            const actions = resource.change && resource.change.actions;
+            if (!Array.isArray(actions)) {
+                return false;
+            }
+            const onlyAction = actions.length === 1 ? actions[0] : null;
+            return onlyAction !== 'no-op' && onlyAction !== 'read';
+        })
+        .map((resource) => ({
+            address: resource.address,
+            type: resource.type,
+            name: resource.name,
+            change: { actions: resource.change.actions },
+        }));
+
+    return {
+        payload: {
+            format_version: plan.format_version,
+            terraform_version: plan.terraform_version,
+            resource_changes: changedResources,
+        },
+        changedCount: changedResources.length,
+        totalCount: resourceChanges.length,
+    };
+}
+
+// Analysis phase: read the plan, reduce/sanitize it, authenticate via OIDC and
+// send it to the backend. Returns the parsed backend response.
+async function analyzePlan(httpClient) {
+    const planPath = core.getInput('plan_path', { required: true });
+    const apiUrl = core.getInput('api_url', { required: false });
+    const audience = core.getInput('audience', { required: false });
+
+    core.info(`Reading Terraform plan from: ${planPath}`);
+    if (!fs.existsSync(planPath)) {
+        throw new Error(`Plan file not found at "${planPath}".`);
+    }
+
+    const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
+    const { payload, changedCount, totalCount } = buildReducedPayload(plan);
+
+    core.info(`Found ${changedCount} changing resource(s) out of ${totalCount}.`);
+    core.info(`Reduced plan sent to backend:\n${JSON.stringify(payload, null, 2)}`);
+    core.setOutput('reduced_plan', JSON.stringify(payload));
+
+    if (changedCount === 0) {
+        core.info('No infrastructure changes to analyze. Skipping backend call.');
+        return null;
+    }
+
+    const idToken = await core.getIDToken(audience);
+    const response = await httpClient.postJson(apiUrl, payload, {
+        Authorization: `Bearer ${idToken}`,
+    });
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw new Error(`Backend responded with status ${response.statusCode}: ${JSON.stringify(response.result)}`);
+    }
+
+    core.info(`Plan summary sent successfully (status ${response.statusCode}).`);
+    core.setOutput('response', JSON.stringify(response.result));
+    return response.result;
+}
+
+// Resolves the Jira issue keys from explicit input, PR title, or branch name.
+// jira_project_keys (e.g. "PROJ,CORE") scopes the parser to real project prefixes.
+function resolveIssueKeys(event) {
+    const explicit = core.getInput('jira_issue_key', { required: false });
+    if (explicit) {
+        return [explicit];
+    }
+    const projectKeysRaw = core.getInput('jira_project_keys', { required: false });
+    const projectKeys = projectKeysRaw
+        ? projectKeysRaw.split(',').map((key) => key.trim().toUpperCase()).filter(Boolean)
+        : [];
+
+    const prTitle = (event.pull_request && event.pull_request.title) || '';
+    const branch = process.env.GITHUB_HEAD_REF || process.env.GITHUB_REF_NAME || '';
+    return [...new Set([
+        ...jira.extractIssueKeys(prTitle, projectKeys),
+        ...jira.extractIssueKeys(branch, projectKeys),
+    ])];
+}
+
+// Runs a single channel delivery, isolating failures unless fail_on_error is set.
+async function deliver(name, enabled, fn, failOnError) {
+    if (!enabled) {
+        return;
+    }
+    try {
+        await fn();
+    } catch (error) {
+        if (failOnError) {
+            throw new Error(`${name} delivery failed: ${error.message}`);
+        }
+        core.warning(`${name} delivery failed: ${error.message}`);
+    }
+}
+
+// Distribution phase: resolve the shared context once, then dispatch the analysis
+// to every configured channel independently.
+async function distribute(analysis, httpClient, event) {
+    const failOnError = core.getInput('fail_on_error', { required: false }) === 'true';
+
+    const jiraCfg = {
+        baseUrl: core.getInput('jira_base_url', { required: false }),
+        email: core.getInput('jira_email', { required: false }),
+        apiToken: core.getInput('jira_api_token', { required: false }),
+    };
+    const issueKeys = resolveIssueKeys(event);
+    const jiraActive = Boolean(jiraCfg.baseUrl && jiraCfg.email && jiraCfg.apiToken && issueKeys.length);
+    const jiraLink = jiraActive ? `${jiraCfg.baseUrl.replace(/\/+$/, '')}/browse/${issueKeys[0]}` : null;
+
+    const slackWebhook = core.getInput('slack_webhook_url', { required: false });
+
+    const prCommentEnabled = core.getInput('pr_comment', { required: false }) === 'true';
+    const githubToken = core.getInput('github_token', { required: false }) || process.env.GITHUB_TOKEN;
+    const repo = process.env.GITHUB_REPOSITORY;
+    const prNumber = event.pull_request && event.pull_request.number;
+    const prMeta = {
+        prUrl: event.pull_request && event.pull_request.html_url,
+        author: event.pull_request && event.pull_request.user && event.pull_request.user.login,
+        repo,
+    };
+
+    // 1) Jira (post to every resolved issue key, each independent)
+    await deliver('Jira', jiraActive, async () => {
+        const adf = jira.buildAdf(analysis);
+        for (const key of issueKeys) {
+            try {
+                await jira.postComment(httpClient, { ...jiraCfg, issueKey: key, adf });
+                core.info(`Posted analysis to Jira issue ${key}.`);
+            } catch (error) {
+                if (failOnError) {
+                    throw error;
+                }
+                core.warning(`Jira delivery failed for ${key}: ${error.message}`);
+            }
+        }
+    }, failOnError);
+    if (!jiraActive) {
+        core.info('Jira delivery skipped (missing config or no issue key).');
+    }
+
+    // 2) Slack (cross-links to Jira when active)
+    await deliver('Slack', Boolean(slackWebhook), async () => {
+        const message = slack.buildMessage(analysis, { jiraLink, ...prMeta });
+        await slack.send(httpClient, slackWebhook, message);
+        core.info('Posted analysis to Slack.');
+    }, failOnError);
+    if (!slackWebhook) {
+        core.info('Slack delivery skipped (no slack_webhook_url).');
+    }
+
+    // 3) GitHub PR comment (upsert)
+    const prActive = Boolean(prCommentEnabled && prNumber && githubToken && repo);
+    await deliver('GitHub PR', prActive, async () => {
+        const body = github.buildMarkdown(analysis, { jiraLink });
+        await github.upsertComment(httpClient, { token: githubToken, repo, prNumber, body });
+        core.info(`Upserted PR comment on #${prNumber}.`);
+    }, failOnError);
+    if (prCommentEnabled && !prActive) {
+        core.info('PR comment skipped (no pull_request context or missing github_token).');
+    }
+}
+
+// Entry point: runs the analysis phase and then the distribution phase.
+async function run() {
+    try {
+        const httpClient = new HttpClient('terraform2jira-action');
+        const result = await analyzePlan(httpClient);
+        if (!result) {
+            return;
+        }
+
+        core.info(`Backend response:\n${JSON.stringify(result, null, 2)}`);
+
+        if (result && result.analysis) {
+            await distribute(result.analysis, httpClient, readEvent());
+        }
+
+        await core.summary
+            .addHeading('Terraform → Business Translator')
+            .addCodeBlock(JSON.stringify(result, null, 2), 'json')
+            .write();
+    } catch (error) {
+        core.setFailed(error.message);
+    }
+}
+
+module.exports = { run };
+
+
+/***/ }),
+
+/***/ 7288:
+/***/ ((module) => {
+
+// Slack integration: renders the business analysis as Block Kit and posts it to
+// an Incoming Webhook. A severity-colored attachment wraps the blocks.
+
+const SEVERITY_COLOR = { low: '#2eb67d', medium: '#ecb22e', high: '#e8912d', critical: '#e01e5a' };
+const SEVERITY_EMOJI = { low: '🟢', medium: '🟡', high: '🟠', critical: '🔴' };
+
+function truncate(value, max) {
+    const text = String(value || '');
+    return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function section(text) {
+    return { type: 'section', text: { type: 'mrkdwn', text: truncate(text, 3000) } };
+}
+
+function buildBlocks(analysis, context) {
+    const severity = String(analysis.severity || 'unknown').toLowerCase();
+    const blocks = [
+        { type: 'header', text: { type: 'plain_text', text: '🗿 Terraform → Business Impact', emoji: true } },
+    ];
+
+    if (analysis.summary) {
+        blocks.push(section(analysis.summary));
+    }
+
+    blocks.push({
+        type: 'section',
+        fields: [
+            { type: 'mrkdwn', text: `*Severity:*\n${SEVERITY_EMOJI[severity] || ''} ${severity}` },
+            { type: 'mrkdwn', text: `*Cost impact:*\n${analysis.cost_impact || 'unknown'}` },
+        ],
+    });
+
+    if (Array.isArray(analysis.resources) && analysis.resources.length) {
+        const list = analysis.resources
+            .map((r) => `• *${r.address}* (${r.action}): ${r.business_impact || ''}`)
+            .join('\n');
+        blocks.push(section(`*Resources*\n${list}`));
+    }
+
+    if (Array.isArray(analysis.risks) && analysis.risks.length) {
+        blocks.push(section(`*Risks*\n${analysis.risks.map((r) => `• ${r}`).join('\n')}`));
+    }
+
+    if (Array.isArray(analysis.recommendations) && analysis.recommendations.length) {
+        blocks.push(section(`*Recommendations*\n${analysis.recommendations.map((r) => `• ${r}`).join('\n')}`));
+    }
+
+    // URL button linking to the Jira ticket (works with Incoming Webhooks)
+    if (context.jiraLink) {
+        blocks.push({
+            type: 'actions',
+            elements: [{
+                type: 'button',
+                text: { type: 'plain_text', text: 'Ver ticket en Jira', emoji: true },
+                url: context.jiraLink,
+                style: 'primary',
+            }],
+        });
+    }
+
+    const contextParts = [];
+    if (context.repo) contextParts.push(context.repo);
+    if (context.author) contextParts.push(`by ${context.author}`);
+    if (context.prUrl) contextParts.push(`<${context.prUrl}|View PR>`);
+    if (contextParts.length) {
+        blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: contextParts.join('  •  ') }] });
+    }
+
+    return blocks;
+}
+
+function buildMessage(analysis, context) {
+    const severity = String(analysis.severity || 'unknown').toLowerCase();
+    return {
+        attachments: [{
+            color: SEVERITY_COLOR[severity] || '#cccccc',
+            blocks: buildBlocks(analysis, context),
+        }],
+    };
+}
+
+// Posts the message to a Slack Incoming Webhook. Throws on non-2xx responses.
+async function send(httpClient, webhookUrl, message) {
+    const response = await httpClient.post(webhookUrl, JSON.stringify(message), {
+        'Content-Type': 'application/json',
+    });
+    const body = await response.readBody();
+    const status = response.message.statusCode;
+    if (status < 200 || status >= 300) {
+        throw new Error(`Slack responded with status ${status}: ${body}`);
+    }
+}
+
+module.exports = { buildMessage, send };
+
+
+/***/ }),
+
 /***/ 4914:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -27555,87 +28068,7 @@ module.exports = parseParams
 /******/ 	
 /************************************************************************/
 var __webpack_exports__ = {};
-const fs = __nccwpck_require__(9896);
-const core = __nccwpck_require__(7484);
-const { HttpClient } = __nccwpck_require__(4844);
-
-async function run() {
-    try {
-        const planPath = core.getInput('plan_path', { required: true });
-        const apiUrl = core.getInput('api_url', { required: false });
-        const audience = core.getInput('audience', { required: false });
-
-        core.info(`Reading Terraform plan from: ${planPath}`);
-        if (!fs.existsSync(planPath)) {
-            throw new Error(`Plan file not found at "${planPath}".`);
-        }
-
-        const rawPlan = fs.readFileSync(planPath, 'utf8');
-        const plan = JSON.parse(rawPlan);
-
-        const resourceChanges = Array.isArray(plan.resource_changes)
-            ? plan.resource_changes
-            : [];
-
-        const changedResources = resourceChanges
-            .filter((resource) => {
-                const actions = resource.change && resource.change.actions;
-                if (!Array.isArray(actions)) {
-                    return false;
-                }
-                const onlyAction = actions.length === 1 ? actions[0] : null;
-                return onlyAction !== 'no-op' && onlyAction !== 'read';
-            })
-            .map((resource) => ({
-                address: resource.address,
-                type: resource.type,
-                name: resource.name,
-                change: { actions: resource.change.actions },
-            }));
-
-        core.info(
-            `Found ${changedResources.length} changing resource(s) out of ${resourceChanges.length}.`
-        );
-
-        const payload = {
-            format_version: plan.format_version,
-            terraform_version: plan.terraform_version,
-            resource_changes: changedResources,
-        };
-
-        // Expose the reduced plan for debugging (log + step output)
-        core.info(`Reduced plan sent to backend:\n${JSON.stringify(payload, null, 2)}`);
-        core.setOutput('reduced_plan', JSON.stringify(payload));
-
-        const idToken = await core.getIDToken(audience);
-
-        const httpClient = new HttpClient('terraform2jira-action');
-        const response = await httpClient.postJson(apiUrl, payload, {
-            Authorization: `Bearer ${idToken}`,
-        });
-
-        const statusCode = response.statusCode;
-        if (statusCode < 200 || statusCode >= 300) {
-            throw new Error(
-                `Backend responded with status ${statusCode}: ${JSON.stringify(response.result)}`
-            );
-        }
-
-        core.info(`Plan summary sent successfully (status ${statusCode}).`);
-
-        // Expose the backend response for debugging (log + output + job summary)
-        const result = response.result;
-        core.info(`Backend response:\n${JSON.stringify(result, null, 2)}`);
-        core.setOutput('response', JSON.stringify(result));
-
-        await core.summary
-            .addHeading('Terraform → Business Translator')
-            .addCodeBlock(JSON.stringify(result, null, 2), 'json')
-            .write();
-    } catch (error) {
-        core.setFailed(error.message);
-    }
-}
+const { run } = __nccwpck_require__(214);
 
 run();
 
