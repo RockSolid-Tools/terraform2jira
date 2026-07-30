@@ -19,6 +19,9 @@ inputs:
     description: 'OIDC audience for the requested token. Must match the OIDC_AUDIENCE configured in the backend.'
     required: false
     default: 'https://terraform2jira-backend.vercel.app'
+  relevant_tags:
+    description: 'Comma-separated tag keys treated as business-relevant (e.g. "Environment,CostCenter,DataClassification"). A resource whose only change is one of these tags is analyzed instead of being bundled as cosmetic noise.'
+    required: false
   jira_base_url:
     description: 'Base URL of your Jira Cloud site (e.g. https://your-company.atlassian.net). Leave empty to disable the Jira integration.'
     required: false
