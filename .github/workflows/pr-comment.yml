@@ -57,5 +57,5 @@ jobs:
           jira_base_url: https://terraform2jira.atlassian.net
           jira_email: ${{ secrets.JIRA_EMAIL }}
           jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
-          jira_issue_key: CORE-1
+          # jira_issue_key: CORE-1
           slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
