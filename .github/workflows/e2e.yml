@@ -70,6 +70,10 @@ jobs:
         with:
           plan_path: tfplan.json
           slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          jira_base_url: https://terraform2jira.atlassian.net
+          jira_email: ${{ secrets.JIRA_EMAIL }}
+          jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
+          jira_issue_key: CORE-1
           # api_url: https://terraform2jira-backend-git-feature-auth-analyze-rock-solid1.vercel.app/api/analyze
 
       - name: Ver plan reducido (debug)
