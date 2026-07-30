@@ -22,35 +22,30 @@ jobs:
                 "address": "aws_s3_bucket.logs",
                 "type": "aws_s3_bucket",
                 "name": "logs",
-                "provider_name": "registry.terraform.io/hashicorp/aws",
                 "change": { "actions": ["create"] }
               },
               {
                 "address": "aws_iam_role.app",
                 "type": "aws_iam_role",
                 "name": "app",
-                "provider_name": "registry.terraform.io/hashicorp/aws",
                 "change": { "actions": ["update"] }
               },
               {
                 "address": "aws_instance.legacy",
                 "type": "aws_instance",
                 "name": "legacy",
-                "provider_name": "registry.terraform.io/hashicorp/aws",
                 "change": { "actions": ["delete"] }
               },
               {
                 "address": "aws_db_instance.main",
                 "type": "aws_db_instance",
                 "name": "main",
-                "provider_name": "registry.terraform.io/hashicorp/aws",
                 "change": { "actions": ["delete", "create"] }
               },
               {
                 "address": "aws_vpc.main",
                 "type": "aws_vpc",
                 "name": "main",
-                "provider_name": "registry.terraform.io/hashicorp/aws",
                 "change": { "actions": ["no-op"] }
               }
             ]
