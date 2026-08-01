@@ -529,6 +529,45 @@ function buildReducedPayload(plan, relevantTags) {
     };
 }
 
+// Transient backend statuses worth retrying (429 rate limit + the 5xx a slow OpenAI
+// generation can trigger on the Vercel function timeout).
+const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// POSTs the reduced plan, retrying transient failures with a linear backoff. Safe: the
+// backend is idempotent per commit, so a retry after a lost success hits its cache, and
+// a failed attempt refunds its quota — retries never double-charge.
+async function postWithRetry(httpClient, url, payload, headers, maxRetries = 2) {
+    for (let attempt = 0; ; attempt += 1) {
+        let response;
+        try {
+            response = await httpClient.postJson(url, payload, headers);
+        } catch (error) {
+            if (attempt < maxRetries) {
+                const waitMs = 2000 * (attempt + 1);
+                core.warning(`Backend request failed (${error.message}); retrying in ${waitMs}ms (retry ${attempt + 1}/${maxRetries}).`);
+                await sleep(waitMs);
+                continue;
+            }
+            throw error;
+        }
+        const status = response.statusCode;
+        if (status >= 200 && status < 300) {
+            return response;
+        }
+        if (RETRYABLE_STATUS.has(status) && attempt < maxRetries) {
+            const waitMs = 2000 * (attempt + 1);
+            core.warning(`Backend responded ${status}; retrying in ${waitMs}ms (retry ${attempt + 1}/${maxRetries}).`);
+            await sleep(waitMs);
+            continue;
+        }
+        throw new Error(`Backend responded with status ${status}: ${JSON.stringify(response.result)}`);
+    }
+}
+
 // Analysis phase: read the plan, reduce/sanitize it, authenticate via OIDC and
 // send it to the backend. Returns the parsed backend response.
 async function analyzePlan(httpClient) {
@@ -559,13 +598,9 @@ async function analyzePlan(httpClient) {
     }
 
     const idToken = await core.getIDToken(audience);
-    const response = await httpClient.postJson(apiUrl, payload, {
+    const response = await postWithRetry(httpClient, apiUrl, payload, {
         Authorization: `Bearer ${idToken}`,
     });
-
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw new Error(`Backend responded with status ${response.statusCode}: ${JSON.stringify(response.result)}`);
-    }
 
     core.info(`Plan summary sent successfully (status ${response.statusCode}).`);
     core.setOutput('response', JSON.stringify(response.result));
