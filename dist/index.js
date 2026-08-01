@@ -23,17 +23,17 @@ function buildMarkdown(analysis, context) {
         `**Severity:** ${SEVERITY_EMOJI[severity] || ''} ${severity}  ·  **Cost:** ${costText}`,
     ];
 
+    if (Array.isArray(analysis.risks) && analysis.risks.length) {
+        lines.push('', '**Risks**');
+        analysis.risks.forEach((r) => lines.push(`- ${r}`));
+    }
+
     if (analysis.overview) {
         lines.push('', `**Overview:** ${analysis.overview}`);
     }
 
     if (context && context.capacityNotice) {
         lines.push('', `> ℹ️ ${context.capacityNotice}`);
-    }
-
-    if (Array.isArray(analysis.risks) && analysis.risks.length) {
-        lines.push('', '**Risks**');
-        analysis.risks.forEach((r) => lines.push(`- ${r}`));
     }
 
     if (Array.isArray(analysis.recommendations) && analysis.recommendations.length) {
@@ -168,17 +168,17 @@ function buildAdf(analysis, capacityNotice) {
         textNode(costText),
     ]));
 
+    if (Array.isArray(analysis.risks) && analysis.risks.length) {
+        content.push(heading(4, 'Risks'));
+        content.push(bulletList(analysis.risks.map((risk) => textNode(risk))));
+    }
+
     if (capacityNotice) {
         content.push(paragraph({ type: 'text', text: `ℹ️ ${capacityNotice}`, marks: [{ type: 'em' }] }));
     }
 
     if (analysis.overview) {
         content.push(paragraph([strongNode('Overview: '), textNode(analysis.overview)]));
-    }
-
-    if (Array.isArray(analysis.risks) && analysis.risks.length) {
-        content.push(heading(4, 'Risks'));
-        content.push(bulletList(analysis.risks.map((risk) => textNode(risk))));
     }
 
     if (Array.isArray(analysis.recommendations) && analysis.recommendations.length) {
@@ -667,8 +667,8 @@ function breakdownLabel(breakdown) {
 }
 
 // Deterministic one-line overview summing the action breakdowns across all groups
-// (instance-level counts), e.g. "3 created · 1 recreated · 2 destroyed · 4 updated
-// (7 groups)". The "brief without losing info" backbone of the executive view.
+// (instance-level counts), e.g. "3 created · 1 recreated · 2 destroyed · 4 updated".
+// The "brief without losing info" backbone of the executive view.
 function overviewLine(payloadModules) {
     const modules = Array.isArray(payloadModules) ? payloadModules : [];
     const total = { replace: 0, delete: 0, create: 0, update: 0 };
@@ -687,7 +687,7 @@ function overviewLine(payloadModules) {
     if (!parts.length) {
         return '';
     }
-    return `${parts.join(' \u00b7 ')} (${modules.length} group${modules.length === 1 ? '' : 's'})`;
+    return parts.join(' \u00b7 ');
 }
 
 // Verb for a block with a single action category (single, non-iterated resource).
@@ -929,16 +929,16 @@ function buildBlocks(analysis, context) {
         ],
     });
 
+    if (Array.isArray(analysis.risks) && analysis.risks.length) {
+        blocks.push(section(`*Risks*\n${analysis.risks.map((r) => `• ${r}`).join('\n')}`));
+    }
+
     if (context.capacityNotice) {
         blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `ℹ️ ${context.capacityNotice}` }] });
     }
 
     if (analysis.overview) {
         blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `*Overview:* ${analysis.overview}` }] });
-    }
-
-    if (Array.isArray(analysis.risks) && analysis.risks.length) {
-        blocks.push(section(`*Risks*\n${analysis.risks.map((r) => `• ${r}`).join('\n')}`));
     }
 
     if (Array.isArray(analysis.recommendations) && analysis.recommendations.length) {

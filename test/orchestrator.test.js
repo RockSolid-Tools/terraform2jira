@@ -266,11 +266,11 @@ test('overviewLine: sums action breakdowns across groups (instance counts)', () 
         { module: 'a', action_breakdown: { replace: 0, delete: 1, create: 0, update: 2 } },
         { module: 'b', action_breakdown: { replace: 1, delete: 1, create: 3, update: 1 } },
     ];
-    assert.equal(overviewLine(modules), '3 created · 1 recreated · 2 destroyed · 3 updated (2 groups)');
+    assert.equal(overviewLine(modules), '3 created · 1 recreated · 2 destroyed · 3 updated');
 });
 
-test('overviewLine: singular group label and empty when nothing', () => {
-    assert.equal(overviewLine([{ module: 'a', action_breakdown: { replace: 0, delete: 0, create: 1, update: 0 } }]), '1 created (1 group)');
+test('overviewLine: renders action tally and empty when nothing', () => {
+    assert.equal(overviewLine([{ module: 'a', action_breakdown: { replace: 0, delete: 0, create: 1, update: 0 } }]), '1 created');
     assert.equal(overviewLine([]), '');
     assert.equal(overviewLine(undefined), '');
 });
