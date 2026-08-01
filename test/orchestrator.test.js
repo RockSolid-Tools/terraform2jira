@@ -457,15 +457,16 @@ const E2E_PLAN = {
         { address: 'azurerm_static_web_app.sites["marketing"]', type: 'azurerm_static_web_app', name: 'sites', index: 'marketing', change: { actions: ['update'], before: { app_settings: { API_URL: 'LEAK_marketing_old' } }, after: { app_settings: { API_URL: 'LEAK_marketing_new' } } } },
         { address: 'azurerm_static_web_app.sites["docs"]', type: 'azurerm_static_web_app', name: 'sites', index: 'docs', change: { actions: ['update'], before: { app_settings: { API_URL: 'LEAK_docs_old' } }, after: { app_settings: { API_URL: 'LEAK_docs_new' } } } },
         { address: 'azurerm_static_web_app.sites["legacy"]', type: 'azurerm_static_web_app', name: 'sites', index: 'legacy', change: { actions: ['delete'] } },
+        { address: 'aws_ecr_repository.adopted', type: 'aws_ecr_repository', name: 'adopted', change: { actions: ['no-op'], importing: { id: 'LEAK_IMPORT_ID_arn_ecr_adopted' } } },
     ],
 };
 
-test('E2E scenario: 10 significant instances across 7 groups, 2 cosmetic, read/no-op dropped', () => {
+test('E2E scenario: 11 significant instances across 8 groups, 2 cosmetic, read/no-op dropped', () => {
     const { payload, significantCount, cosmeticCount, moduleCount, totalCount } = buildReducedPayload(E2E_PLAN, ['Environment', 'CostCenter']);
-    assert.equal(significantCount, 10);
+    assert.equal(significantCount, 11);
     assert.equal(cosmeticCount, 2);
-    assert.equal(moduleCount, 7);
-    assert.equal(totalCount, 14);
+    assert.equal(moduleCount, 8);
+    assert.equal(totalCount, 15);
 
     // cosmos_db is a real module with 2 resources.
     const cosmos = moduleByName(payload, 'module.cosmos_db');
@@ -486,11 +487,15 @@ test('E2E scenario: 10 significant instances across 7 groups, 2 cosmetic, read/n
     const lambda = moduleByName(payload, 'aws_lambda_function.api');
     assert.deepEqual(lambda.resources[0].changed, ['tags.Environment']);
 
+    // The no-op import is surfaced (not dropped) as an import action.
+    const imported = moduleByName(payload, 'aws_ecr_repository.adopted');
+    assert.deepEqual(imported.resources[0].action_breakdown, { replace: 0, delete: 0, create: 0, import: 1, update: 0 });
+
     assert.deepEqual(payload.change_summary, {
-        total_changes: 12,
+        total_changes: 13,
         cosmetic_omitted: 2,
-        significant_total: 10,
-        modules_total: 7,
+        significant_total: 11,
+        modules_total: 8,
     });
 });
 
