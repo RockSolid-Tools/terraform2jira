@@ -4,9 +4,6 @@
 /***/ 6681:
 /***/ ((module) => {
 
-// GitHub PR comment integration: renders the business analysis as Markdown and
-// upserts a single bot comment on the pull request (no thread spam).
-
 const MARKER = '<!-- terraform2jira -->';
 const SEVERITY_EMOJI = { low: '🟢', medium: '🟡', high: '🟠', critical: '🔴' };
 const COST_ARROW = { increase: '↑', decrease: '↓', neutral: '→' };
@@ -45,7 +42,6 @@ function buildMarkdown(analysis, context) {
         lines.push('', `🔗 [View ticket in Jira](${context.jiraLink})`);
     }
 
-    // Full per-resource detail, collapsed behind a native <details> toggle.
     if (Array.isArray(analysis.modules) && analysis.modules.length) {
         lines.push('', '<details>', '<summary>Details — resource changes</summary>', '');
         analysis.modules.forEach((mod, i) => {
@@ -69,7 +65,6 @@ function apiHeaders(token) {
     };
 }
 
-// Finds the existing bot comment (by marker) and updates it, or creates a new one.
 async function upsertComment(httpClient, { token, repo, prNumber, body }) {
     const base = process.env.GITHUB_API_URL || 'https://api.github.com';
     const headers = apiHeaders(token);
@@ -102,16 +97,11 @@ module.exports = { buildMarkdown, upsertComment };
 /***/ 8446:
 /***/ ((module) => {
 
-// Jira Cloud integration: builds an Atlassian Document Format (ADF) comment
-// from the business analysis and posts it to the issue's comment endpoint.
-
 const SEVERITY_EMOJI = { low: '🟢', medium: '🟡', high: '🟠', critical: '🔴' };
 const COST_ARROW = { increase: '↑', decrease: '↓', neutral: '→' };
 const MARKER = 'Posted by terraform2jira';
 
-// Extracts unique Jira issue keys (e.g. "PROJ-123") from a text.
-// When projectKeys is a non-empty array, only keys with those project prefixes
-// match, which avoids false positives like "UTF-8" or "HTTP-2".
+// projectKeys scopes the match to real prefixes, avoiding false positives like "UTF-8".
 function extractIssueKeys(text, projectKeys) {
     if (!text) {
         return [];
@@ -149,7 +139,6 @@ function bulletList(itemsContent) {
     };
 }
 
-// Builds the ADF document representing the analysis.
 function buildAdf(analysis, capacityNotice) {
     const content = [heading(3, '🗿 Terraform → Business Impact')];
 
@@ -186,7 +175,6 @@ function buildAdf(analysis, capacityNotice) {
         content.push(bulletList(analysis.recommendations.map((rec) => textNode(rec))));
     }
 
-    // Full per-resource detail, collapsed inside a native ADF expand block.
     if (Array.isArray(analysis.modules) && analysis.modules.length) {
         const details = [];
         analysis.modules.forEach((mod, i) => {
@@ -212,7 +200,6 @@ function buildAdf(analysis, capacityNotice) {
 
 let cachedTimeZone;
 
-// Reads the timezone configured for the token account (proxy for the Jira instance tz).
 async function fetchTimeZone(httpClient, base, headers) {
     if (cachedTimeZone) {
         return cachedTimeZone;
@@ -226,7 +213,6 @@ async function fetchTimeZone(httpClient, base, headers) {
     return cachedTimeZone;
 }
 
-// Marker + localized timestamp footer, rendered in the Jira account's timezone.
 function footerNodes(timeZone) {
     const stamp = new Intl.DateTimeFormat('en-GB', {
         timeZone,
@@ -246,8 +232,6 @@ function footerNodes(timeZone) {
     ];
 }
 
-// Upserts the ADF comment on the Jira issue: updates the bot's previous comment
-// (found by the marker footer) or creates a new one. Throws on non-2xx responses.
 async function upsertComment(httpClient, { baseUrl, email, apiToken, issueKey, adf }) {
     const base = baseUrl.replace(/\/+$/, '');
     const auth = Buffer.from(`${email}:${apiToken}`).toString('base64');
@@ -290,7 +274,6 @@ const jira = __nccwpck_require__(8446);
 const slack = __nccwpck_require__(7288);
 const github = __nccwpck_require__(6681);
 
-// Reads the GitHub event payload (pull request title, author, number, etc.).
 function readEvent() {
     const eventPath = process.env.GITHUB_EVENT_PATH;
     if (!eventPath || !fs.existsSync(eventPath)) {
@@ -303,16 +286,13 @@ function readEvent() {
     }
 }
 
-// Top-level attributes whose sole change is treated as cosmetic noise (bundled as
-// a count instead of being sent for individual AI analysis).
 const COSMETIC_ATTRS = new Set(['tags', 'tags_all']);
 
 function deepEqual(a, b) {
     return JSON.stringify(a) === JSON.stringify(b);
 }
 
-// Top-level attribute names that differ between before/after. Values known only
-// after apply count as changes. Names only — no values leave the runner (DLP).
+// Changed top-level attribute names only — no values leave the runner (DLP).
 function changedAttributes(change) {
     const before = change.before && typeof change.before === 'object' ? change.before : {};
     const after = change.after && typeof change.after === 'object' ? change.after : {};
@@ -327,7 +307,7 @@ function changedAttributes(change) {
     return changed.sort();
 }
 
-// Tag keys that differ inside the tags/tags_all maps (names only, never values).
+// Changed tag key names only, never values (DLP).
 function changedTagKeys(change) {
     const keys = new Set();
     for (const attr of ['tags', 'tags_all']) {
@@ -344,8 +324,7 @@ function changedTagKeys(change) {
     return [...keys];
 }
 
-// Canonical resource-block address, ignoring any count/for_each index, so all
-// iterations of one block collapse together (module.x.type.name or type.name).
+// Block address without the count/for_each index, so iterations collapse together.
 function blockAddress(resource) {
     if (resource.type && resource.name) {
         const prefix = resource.module_address ? `${resource.module_address}.` : '';
@@ -354,15 +333,11 @@ function blockAddress(resource) {
     return resource.address;
 }
 
-// Grouping key: Terraform's canonical "module_address" when the resource is inside a
-// module (groups all its resources together), or the resource block address for a
-// standalone root resource (its count/for_each iterations still share one group).
-// Universal — module_address is core Terraform, independent of provider/architecture.
+// Group by module_address, or the block address for a standalone root resource.
 function groupKey(resource) {
     return resource.module_address || blockAddress(resource);
 }
 
-// Categorizes a change for the per-module action breakdown and ranking.
 function categorizeAction(actions) {
     const hasDelete = actions.includes('delete');
     const hasCreate = actions.includes('create');
@@ -372,7 +347,6 @@ function categorizeAction(actions) {
     return 'update';
 }
 
-// Ranks a resource-block breakdown so destructive blocks surface first within a group.
 function breakdownRank(breakdown) {
     if (breakdown.replace + breakdown.delete > 0) return 0;
     if (breakdown.create > 0) return 1;
@@ -380,12 +354,8 @@ function breakdownRank(breakdown) {
     return 3;
 }
 
-// Builds the reduced, sanitized payload sent to the backend (DLP applied here):
-// only non-sensitive metadata leaves the runner. no-op/read are dropped, tag-only
-// changes are bundled as a count, significant changes are grouped by module, and
-// count/for_each iterations of a block are collapsed into one entry with an instance
-// count + per-action breakdown (so mixed actions are never lost). The backend caps
-// how many modules are analyzed and owns the payload ceiling.
+// Builds the DLP-sanitized payload: drop no-op/read, bundle cosmetic tags, group by
+// module and collapse for_each iterations. Only non-sensitive metadata leaves the runner.
 function buildReducedPayload(plan, relevantTags) {
     const resourceChanges = Array.isArray(plan.resource_changes) ? plan.resource_changes : [];
 
@@ -398,9 +368,7 @@ function buildReducedPayload(plan, relevantTags) {
         if (!Array.isArray(actions)) {
             continue;
         }
-        // An import adopts existing infrastructure into Terraform management; the plan
-        // marks it with change.importing and it otherwise often looks like a no-op.
-        // Surface it (the import id itself is never forwarded — DLP-safe).
+        // Imports (change.importing) are surfaced as an import action; the id is never sent (DLP).
         const importing = Boolean(change.importing);
         const onlyAction = actions.length === 1 ? actions[0] : null;
         if ((onlyAction === 'no-op' || onlyAction === 'read') && !importing) {
@@ -411,7 +379,6 @@ function buildReducedPayload(plan, relevantTags) {
             const changed = changedAttributes(change);
             const tagOnly = changed.length > 0 && changed.every((attr) => COSMETIC_ATTRS.has(attr));
             if (tagOnly) {
-                // Cosmetic unless the change touches a tag the user flagged as relevant.
                 const relevantChanged = relevantTags.length
                     ? changedTagKeys(change).filter((key) => relevantTags.includes(key))
                     : [];
@@ -428,9 +395,8 @@ function buildReducedPayload(plan, relevantTags) {
         }
     }
 
-    // Group by module (or singleton root), and within each group collapse a block's
-    // count/for_each iterations into one entry. Every action_breakdown counts
-    // instances, so a lone delete among many updates is always reported.
+    // Collapse each block's for_each iterations into one instance-counted entry, so a
+    // lone delete among many updates is never lost.
     const groups = new Map();
     for (const { resource, actions, changed, importing } of significant) {
         const key = groupKey(resource);
@@ -465,8 +431,7 @@ function buildReducedPayload(plan, relevantTags) {
         const entry = group.entries.get(block);
         entry.instances += 1;
         entry.action_breakdown[category] += 1;
-        // Preserve which count/for_each instances suffer a destructive action so the
-        // message and the LLM can name them (e.g. "destroyed: legacy"), not just count.
+        // Keep the specific instance keys hit by a destructive action, not just the count.
         if (resource.index !== undefined) {
             if (category === 'delete') entry.destroyed.add(String(resource.index));
             if (category === 'replace') entry.recreated.add(String(resource.index));
@@ -484,9 +449,6 @@ function buildReducedPayload(plan, relevantTags) {
         }
     }
 
-    // Finalize entries (Sets → arrays) and sort blocks destructive-first per group.
-    // A single changed instance keeps its full indexed address; a collapsed block
-    // additionally lists the specific instances hit by a destructive action.
     const finalizeEntry = (e) => {
         const out = {
             address: e.instances === 1 ? e.first_address : e.address,
@@ -512,8 +474,7 @@ function buildReducedPayload(plan, relevantTags) {
             .sort((x, y) => breakdownRank(x.action_breakdown) - breakdownRank(y.action_breakdown)),
     }));
 
-    // Rank modules by risk: most destructive first (replace+delete instances, then
-    // create, then update), so the backend's module cap keeps the highest-impact ones.
+    // Rank groups destructive-first so the backend cap keeps the highest-impact ones.
     modules.sort((a, b) => {
         const da = a.action_breakdown.replace + a.action_breakdown.delete;
         const db = b.action_breakdown.replace + b.action_breakdown.delete;
@@ -532,9 +493,6 @@ function buildReducedPayload(plan, relevantTags) {
             format_version: plan.format_version,
             terraform_version: plan.terraform_version,
             modules,
-            // The backend caps how many modules are analyzed and computes the final
-            // analyzed/omitted counts; it only needs the true totals from the client.
-            // significant_total counts resource instances (not collapsed blocks).
             change_summary: {
                 total_changes: significant.length + cosmeticCount,
                 cosmetic_omitted: cosmeticCount,
@@ -549,16 +507,13 @@ function buildReducedPayload(plan, relevantTags) {
     };
 }
 
-// Transient backend statuses worth retrying (429 rate limit + the 5xx a slow OpenAI
-// generation can trigger on the Vercel function timeout).
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Maps a backend failure to a concise, user-facing message. Raw detail is logged at
-// debug level only, so internal errors never leak into the Action output.
+// User-facing message per status; raw detail goes to debug only (never leaks).
 function friendlyBackendError(status, result) {
     switch (status) {
         case 401:
@@ -577,9 +532,8 @@ function friendlyBackendError(status, result) {
     }
 }
 
-// POSTs the reduced plan, retrying transient failures with a linear backoff. Safe: the
-// backend is idempotent per commit, so a retry after a lost success hits its cache, and
-// a failed attempt refunds its quota — retries never double-charge.
+// Retries transient failures. Safe: the backend is idempotent per commit and refunds
+// quota on failure, so retries never double-charge.
 async function postWithRetry(httpClient, url, payload, headers, maxRetries = 2) {
     for (let attempt = 0; ; attempt += 1) {
         let response;
@@ -610,8 +564,6 @@ async function postWithRetry(httpClient, url, payload, headers, maxRetries = 2) 
     }
 }
 
-// Analysis phase: read the plan, reduce/sanitize it, authenticate via OIDC and
-// send it to the backend. Returns the parsed backend response.
 async function analyzePlan(httpClient) {
     const planPath = core.getInput('plan_path', { required: true });
     const apiUrl = core.getInput('api_url', { required: false });
@@ -650,8 +602,6 @@ async function analyzePlan(httpClient) {
     return { result: response.result, changeSummary, payloadModules: payload.modules };
 }
 
-// Resolves the Jira issue keys from explicit input, PR title, or branch name.
-// jira_project_keys (e.g. "PROJ,CORE") scopes the parser to real project prefixes.
 function resolveIssueKeys(event) {
     const explicit = core.getInput('jira_issue_key', { required: false });
     if (explicit) {
@@ -670,7 +620,6 @@ function resolveIssueKeys(event) {
     ])];
 }
 
-// Runs a single channel delivery, isolating failures unless fail_on_error is set.
 async function deliver(name, enabled, fn, failOnError) {
     if (!enabled) {
         return;
@@ -685,7 +634,6 @@ async function deliver(name, enabled, fn, failOnError) {
     }
 }
 
-// Renders a compact action breakdown string for a module header (skips zeros).
 function breakdownLabel(breakdown) {
     const b = breakdown || {};
     const parts = [];
@@ -697,9 +645,6 @@ function breakdownLabel(breakdown) {
     return parts.join(', ');
 }
 
-// Deterministic one-line overview summing the action breakdowns across all groups
-// (instance-level counts), e.g. "3 created · 1 recreated · 2 destroyed · 4 updated".
-// The "brief without losing info" backbone of the executive view.
 function overviewLine(payloadModules) {
     const modules = Array.isArray(payloadModules) ? payloadModules : [];
     const total = { replace: 0, delete: 0, create: 0, import: 0, update: 0 };
@@ -723,16 +668,8 @@ function overviewLine(payloadModules) {
     return parts.join(' \u00b7 ');
 }
 
-// Verb for a block with a single action category (single, non-iterated resource).
 const ACTION_WORD = { replace: 'recreated', delete: 'destroyed', create: 'created', import: 'imported', update: 'updated' };
 
-// Human label for one resource block, collapsing count/for_each iterations. A block
-// with multiple instances shows the count + full breakdown so mixed actions (e.g. one
-// delete among many updates) are always visible, and names the specific instances hit
-// by a destructive action.
-// Action/instance text for a resource block, WITHOUT the address (the formatters
-// render the address separately in code style). Collapses count/for_each iterations
-// and names the instances hit by a destructive action.
 function resourceMeta(entry) {
     const bd = entry.action_breakdown || {};
     const instances = entry.instances || 1;
@@ -762,10 +699,6 @@ function resourceMeta(entry) {
     return `(${ACTION_WORD[action] || 'updated'})`;
 }
 
-// Merges the LLM's per-module narrative with the deterministic identifiers the client
-// already computed. Emits a uniform header ({ code: identifier, meta: action text }) for
-// both modules and standalone resources, plus per-resource {code, meta} for modules — so
-// every channel renders the identifier in code style and the action as plain text.
 function enrichModules(analysis, payloadModules) {
     const byName = new Map((payloadModules || []).map((m) => [m.module, m]));
     const llmModules = Array.isArray(analysis.modules) ? analysis.modules : [];
@@ -779,7 +712,6 @@ function enrichModules(analysis, payloadModules) {
             is_module: isModule,
             business_impact: m.business_impact,
             risk: m.risk,
-            // Header: module → friendly name ("module." stripped); singleton → resource address.
             code: isModule
                 ? (m.module.startsWith('module.') ? m.module.slice('module.'.length) : m.module)
                 : first.address,
@@ -791,10 +723,6 @@ function enrichModules(analysis, payloadModules) {
     });
 }
 
-// Builds a deterministic notice about changes the client could not send for
-// detailed analysis (module capacity cap / cosmetic noise). Null when nothing was
-// omitted. Reports omitted resource counts (not just modules) so the reader knows
-// the real magnitude behind an omitted group.
 function buildCapacityNotice(changeSummary) {
     if (!changeSummary) {
         return null;
@@ -810,9 +738,6 @@ function buildCapacityNotice(changeSummary) {
     return parts.length ? `${parts.join('; ')}.` : null;
 }
 
-// Distribution phase: resolve the shared context once, then dispatch the analysis
-// to every configured channel independently. Only runs for fresh analyses; cached
-// replays are short-circuited earlier since every channel was already delivered.
 async function distribute(analysis, httpClient, event, changeSummary, payloadModules) {
     const failOnError = core.getInput('fail_on_error', { required: false }) === 'true';
     const capacityNotice = buildCapacityNotice(changeSummary);
@@ -839,7 +764,6 @@ async function distribute(analysis, httpClient, event, changeSummary, payloadMod
         repo,
     };
 
-    // 1) Jira (upsert to every resolved issue key, each independent)
     await deliver('Jira', jiraActive, async () => {
         const adf = jira.buildAdf(analysisView, capacityNotice);
         for (const key of issueKeys) {
@@ -858,7 +782,6 @@ async function distribute(analysis, httpClient, event, changeSummary, payloadMod
         core.info('Jira delivery skipped (missing config or no issue key).');
     }
 
-    // 2) Slack (cross-links to Jira when active)
     await deliver('Slack', Boolean(slackWebhook), async () => {
         const message = slack.buildMessage(analysisView, { jiraLink, capacityNotice, ...prMeta });
         await slack.send(httpClient, slackWebhook, message);
@@ -868,7 +791,6 @@ async function distribute(analysis, httpClient, event, changeSummary, payloadMod
         core.info('Slack delivery skipped (no slack_webhook_url).');
     }
 
-    // 3) GitHub PR comment (upsert)
     const prActive = Boolean(prCommentEnabled && prNumber && githubToken && repo);
     await deliver('GitHub PR', prActive, async () => {
         const body = github.buildMarkdown(analysisView, { jiraLink, capacityNotice });
@@ -880,7 +802,6 @@ async function distribute(analysis, httpClient, event, changeSummary, payloadMod
     }
 }
 
-// Entry point: runs the analysis phase and then the distribution phase.
 async function run() {
     try {
         const httpClient = new HttpClient('terraform2jira-action');
@@ -909,7 +830,6 @@ async function run() {
 
 module.exports = {
     run,
-    // Exported for unit testing (pure, side-effect-free helpers).
     buildReducedPayload,
     changedAttributes,
     changedTagKeys,
@@ -925,9 +845,6 @@ module.exports = {
 
 /***/ 7288:
 /***/ ((module) => {
-
-// Slack integration: renders the business analysis as Block Kit and posts it to
-// an Incoming Webhook. A severity-colored attachment wraps the blocks.
 
 const SEVERITY_COLOR = { low: '#2eb67d', medium: '#ecb22e', high: '#e8912d', critical: '#e01e5a' };
 const SEVERITY_EMOJI = { low: '🟢', medium: '🟡', high: '🟠', critical: '🔴' };
@@ -978,7 +895,6 @@ function buildBlocks(analysis, context) {
         blocks.push(section(`*Recommendations*\n${analysis.recommendations.map((r) => `• ${r}`).join('\n')}`));
     }
 
-    // URL button linking to the Jira ticket (works with Incoming Webhooks)
     if (context.jiraLink) {
         blocks.push({
             type: 'actions',
@@ -991,8 +907,7 @@ function buildBlocks(analysis, context) {
         });
     }
 
-    // Full per-resource detail (Slack Incoming Webhooks can't collapse; a divider +
-    // header marks the section, and Slack auto-truncates long messages with "Show more").
+    // Slack webhooks can't collapse; a divider marks the detail section (auto-truncated).
     if (Array.isArray(analysis.modules) && analysis.modules.length) {
         blocks.push({ type: 'divider' });
         blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '*Details — resource changes*' }] });
@@ -1030,7 +945,6 @@ function buildMessage(analysis, context) {
     };
 }
 
-// Posts the message to a Slack Incoming Webhook. Throws on non-2xx responses.
 async function send(httpClient, webhookUrl, message) {
     const response = await httpClient.post(webhookUrl, JSON.stringify(message), {
         'Content-Type': 'application/json',
