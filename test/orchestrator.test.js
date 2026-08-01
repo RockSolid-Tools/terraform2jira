@@ -316,6 +316,37 @@ test('enrichModules: labels a single-instance block with the action verb', () =>
     assert.equal(mod.resources[0].label, 'aws_s3_bucket.logs (created)');
 });
 
+test('enrichModules: a single-instance update names the changed attributes', () => {
+    const analysis = { modules: [{ module: 'aws_iam_role.app', business_impact: 'x', risk: 'y' }] };
+    const payloadModules = [{
+        module: 'aws_iam_role.app',
+        is_module: false,
+        action_breakdown: { replace: 0, delete: 0, create: 0, update: 1 },
+        resources: [{ address: 'aws_iam_role.app', instances: 1, action_breakdown: { replace: 0, delete: 0, create: 0, update: 1 }, changed: ['assume_role_policy', 'managed_policy_arns'] }],
+    }];
+    const [mod] = enrichModules(analysis, payloadModules);
+    assert.equal(mod.resources[0].label, 'aws_iam_role.app (updated: assume_role_policy, managed_policy_arns)');
+});
+
+test('enrichModules: caps the changed list at 3 attributes with an ellipsis', () => {
+    const analysis = { modules: [{ module: 'aws_x.y', business_impact: 'x', risk: 'y' }] };
+    const payloadModules = [{
+        module: 'aws_x.y',
+        is_module: false,
+        action_breakdown: { replace: 0, delete: 0, create: 0, update: 1 },
+        resources: [{ address: 'aws_x.y', instances: 1, action_breakdown: { replace: 0, delete: 0, create: 0, update: 1 }, changed: ['a', 'b', 'c', 'd'] }],
+    }];
+    const [mod] = enrichModules(analysis, payloadModules);
+    assert.equal(mod.resources[0].label, 'aws_x.y (updated: a, b, c, …)');
+});
+
+test('enrichModules: drops the "module." prefix in the display name', () => {
+    const analysis = { modules: [{ module: 'module.cosmos_db', business_impact: 'x', risk: 'y' }] };
+    const payloadModules = [{ module: 'module.cosmos_db', is_module: true, action_breakdown: { replace: 0, delete: 0, create: 2, update: 0 }, resources: [] }];
+    const [mod] = enrichModules(analysis, payloadModules);
+    assert.equal(mod.display, 'cosmos_db');
+});
+
 test('DLP guard: serialized grouped/collapsed payload never contains before/after values', () => {
     const plan = {
         format_version: '1.2',

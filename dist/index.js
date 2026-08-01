@@ -9,15 +9,18 @@
 
 const MARKER = '<!-- terraform2jira -->';
 const SEVERITY_EMOJI = { low: '🟢', medium: '🟡', high: '🟠', critical: '🔴' };
+const COST_ARROW = { increase: '↑', decrease: '↓', neutral: '→' };
 
 function buildMarkdown(analysis, context) {
     const severity = String(analysis.severity || 'unknown').toLowerCase();
+    const cost = String(analysis.cost_impact || 'unknown').toLowerCase();
+    const costText = COST_ARROW[cost] ? `${COST_ARROW[cost]} ${cost}` : cost;
     const lines = [
         '### 🗿 Terraform → Business Impact',
         '',
         analysis.summary || '',
         '',
-        `**Severity:** ${SEVERITY_EMOJI[severity] || ''} ${severity}  |  **Cost impact:** ${analysis.cost_impact || 'unknown'}`,
+        `**Severity:** ${SEVERITY_EMOJI[severity] || ''} ${severity}  ·  **Cost:** ${costText}`,
     ];
 
     if (context && context.capacityNotice) {
@@ -26,9 +29,10 @@ function buildMarkdown(analysis, context) {
 
     if (Array.isArray(analysis.modules) && analysis.modules.length) {
         lines.push('', '**Changes**');
-        analysis.modules.forEach((mod) => {
+        analysis.modules.forEach((mod, i) => {
+            if (i > 0) lines.push('', '---');
             if (mod.is_module) {
-                const header = mod.action_summary ? `${mod.module} — ${mod.action_summary}` : mod.module;
+                const header = mod.action_summary ? `${mod.display} — ${mod.action_summary}` : mod.display;
                 lines.push('', `**${header}**`);
                 if (mod.business_impact) lines.push(mod.business_impact);
                 (mod.resources || []).forEach((r) => lines.push(`- \`${r.label}\``));
@@ -103,6 +107,7 @@ module.exports = { buildMarkdown, upsertComment };
 // from the business analysis and posts it to the issue's comment endpoint.
 
 const SEVERITY_EMOJI = { low: '🟢', medium: '🟡', high: '🟠', critical: '🔴' };
+const COST_ARROW = { increase: '↑', decrease: '↓', neutral: '→' };
 const MARKER = 'Posted by terraform2jira';
 
 // Extracts unique Jira issue keys (e.g. "PROJ-123") from a text.
@@ -154,12 +159,14 @@ function buildAdf(analysis, capacityNotice) {
     }
 
     const severity = String(analysis.severity || 'unknown').toLowerCase();
+    const cost = String(analysis.cost_impact || 'unknown').toLowerCase();
+    const costText = COST_ARROW[cost] ? `${COST_ARROW[cost]} ${cost}` : cost;
     content.push(paragraph([
         strongNode('Severity: '),
         textNode(`${SEVERITY_EMOJI[severity] || ''} ${severity}`),
-        textNode('    |    '),
-        strongNode('Cost impact: '),
-        textNode(analysis.cost_impact || 'unknown'),
+        textNode('    ·    '),
+        strongNode('Cost: '),
+        textNode(costText),
     ]));
 
     if (capacityNotice) {
@@ -168,9 +175,10 @@ function buildAdf(analysis, capacityNotice) {
 
     if (Array.isArray(analysis.modules) && analysis.modules.length) {
         content.push(heading(4, 'Changes'));
-        for (const mod of analysis.modules) {
+        analysis.modules.forEach((mod, i) => {
+            if (i > 0) content.push({ type: 'rule' });
             if (mod.is_module) {
-                const header = mod.action_summary ? `${mod.module} — ${mod.action_summary}` : mod.module;
+                const header = mod.action_summary ? `${mod.display} — ${mod.action_summary}` : mod.display;
                 content.push(paragraph(strongNode(header)));
                 if (mod.business_impact) {
                     content.push(paragraph(textNode(mod.business_impact)));
@@ -188,7 +196,7 @@ function buildAdf(analysis, capacityNotice) {
             if (mod.risk) {
                 content.push(paragraph([strongNode('Risk: '), textNode(mod.risk)]));
             }
-        }
+        });
     }
 
     if (Array.isArray(analysis.risks) && analysis.risks.length) {
@@ -554,7 +562,8 @@ async function analyzePlan(httpClient) {
     const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
     const { payload, significantCount, cosmeticCount, moduleCount, totalCount } = buildReducedPayload(plan, relevantTags);
 
-    core.info(`Changes: ${significantCount} significant in ${moduleCount} module(s), ${cosmeticCount} cosmetic (tags), of ${totalCount} total.`);
+    const skippedCount = totalCount - significantCount - cosmeticCount;
+    core.info(`Changes: ${significantCount} significant in ${moduleCount} group(s), ${cosmeticCount} cosmetic (tags), ${skippedCount} skipped (no-op/read); ${totalCount} total.`);
     core.info(`Reduced plan sent to backend:\n${JSON.stringify(payload, null, 2)}`);
     core.setOutput('reduced_plan', JSON.stringify(payload));
 
@@ -634,8 +643,13 @@ const ACTION_WORD = { replace: 'recreated', delete: 'destroyed', create: 'create
 function resourceLabel(entry) {
     const bd = entry.action_breakdown || {};
     const instances = entry.instances || 1;
+    const changed = Array.isArray(entry.changed) ? entry.changed : [];
+    const changedText = changed.length
+        ? `${changed.slice(0, 3).join(', ')}${changed.length > 3 ? ', \u2026' : ''}`
+        : '';
+
     if (instances > 1) {
-        let label = `${entry.address} \u00d7${instances} \u2014 ${breakdownLabel(bd)}`;
+        const label = `${entry.address} \u00d7${instances} \u2014 ${breakdownLabel(bd)}`;
         const notable = [];
         if (entry.recreated_instances && entry.recreated_instances.length) {
             notable.push(`recreated: ${entry.recreated_instances.join(', ')}`);
@@ -643,9 +657,15 @@ function resourceLabel(entry) {
         if (entry.destroyed_instances && entry.destroyed_instances.length) {
             notable.push(`destroyed: ${entry.destroyed_instances.join(', ')}`);
         }
+        if (changedText) {
+            notable.push(`changed: ${changedText}`);
+        }
         return notable.length ? `${label} (${notable.join('; ')})` : label;
     }
     const action = ['replace', 'delete', 'create', 'update'].find((k) => bd[k] > 0);
+    if (action === 'update' && changedText) {
+        return `${entry.address} (updated: ${changedText})`;
+    }
     return `${entry.address} (${ACTION_WORD[action] || 'updated'})`;
 }
 
@@ -659,6 +679,8 @@ function enrichModules(analysis, payloadModules) {
         const data = byName.get(m.module) || { resources: [], action_breakdown: {} };
         return {
             module: m.module,
+            // Friendlier header: drop the "module." prefix (keep exact addresses in subitems).
+            display: m.module.startsWith('module.') ? m.module.slice('module.'.length) : m.module,
             is_module: Boolean(data.is_module),
             business_impact: m.business_impact,
             risk: m.risk,
@@ -807,6 +829,7 @@ module.exports = {
 
 const SEVERITY_COLOR = { low: '#2eb67d', medium: '#ecb22e', high: '#e8912d', critical: '#e01e5a' };
 const SEVERITY_EMOJI = { low: '🟢', medium: '🟡', high: '🟠', critical: '🔴' };
+const COST_ARROW = { increase: '↑', decrease: '↓', neutral: '→' };
 
 function truncate(value, max) {
     const text = String(value || '');
@@ -819,6 +842,8 @@ function section(text) {
 
 function buildBlocks(analysis, context) {
     const severity = String(analysis.severity || 'unknown').toLowerCase();
+    const cost = String(analysis.cost_impact || 'unknown').toLowerCase();
+    const costText = COST_ARROW[cost] ? `${COST_ARROW[cost]} ${cost}` : cost;
     const blocks = [
         { type: 'header', text: { type: 'plain_text', text: '🗿 Terraform → Business Impact', emoji: true } },
     ];
@@ -831,7 +856,7 @@ function buildBlocks(analysis, context) {
         type: 'section',
         fields: [
             { type: 'mrkdwn', text: `*Severity:*\n${SEVERITY_EMOJI[severity] || ''} ${severity}` },
-            { type: 'mrkdwn', text: `*Cost impact:*\n${analysis.cost_impact || 'unknown'}` },
+            { type: 'mrkdwn', text: `*Cost:*\n${costText}` },
         ],
     });
 
@@ -840,10 +865,11 @@ function buildBlocks(analysis, context) {
     }
 
     if (Array.isArray(analysis.modules) && analysis.modules.length) {
-        for (const mod of analysis.modules) {
+        analysis.modules.forEach((mod, i) => {
+            if (i > 0) blocks.push({ type: 'divider' });
             const lines = [];
             if (mod.is_module) {
-                const header = mod.action_summary ? `${mod.module} — ${mod.action_summary}` : mod.module;
+                const header = mod.action_summary ? `${mod.display} — ${mod.action_summary}` : mod.display;
                 lines.push(`*${header}*`);
                 if (mod.business_impact) lines.push(mod.business_impact);
                 const resList = (mod.resources || [])
@@ -857,7 +883,7 @@ function buildBlocks(analysis, context) {
             }
             if (mod.risk) lines.push(`*Risk:* ${mod.risk}`);
             blocks.push(section(lines.join('\n')));
-        }
+        });
     }
 
     if (Array.isArray(analysis.risks) && analysis.risks.length) {
