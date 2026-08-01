@@ -557,6 +557,26 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Maps a backend failure to a concise, user-facing message. Raw detail is logged at
+// debug level only, so internal errors never leak into the Action output.
+function friendlyBackendError(status, result) {
+    switch (status) {
+        case 401:
+            return 'Backend authentication failed. Ensure the workflow grants `permissions: id-token: write` and the `audience` input matches the backend.';
+        case 402:
+            return 'Your organization has reached its monthly analysis quota. Upgrade your plan to keep receiving summaries.';
+        case 403:
+            return 'This repository is not allowed to run analyses (inactive or no active plan).';
+        case 413:
+            return 'The Terraform plan is too large to analyze in a single request.';
+        default:
+            if (status === 429 || status >= 500) {
+                return 'The analysis service is temporarily unavailable. Please try again later.';
+            }
+            return `The analysis service returned an unexpected error (status ${status}).`;
+    }
+}
+
 // POSTs the reduced plan, retrying transient failures with a linear backoff. Safe: the
 // backend is idempotent per commit, so a retry after a lost success hits its cache, and
 // a failed attempt refunds its quota — retries never double-charge.
@@ -572,7 +592,8 @@ async function postWithRetry(httpClient, url, payload, headers, maxRetries = 2) 
                 await sleep(waitMs);
                 continue;
             }
-            throw error;
+            core.debug(`Backend request error: ${error.message}`);
+            throw new Error('Could not reach the analysis service. Please try again later.');
         }
         const status = response.statusCode;
         if (status >= 200 && status < 300) {
@@ -584,7 +605,8 @@ async function postWithRetry(httpClient, url, payload, headers, maxRetries = 2) 
             await sleep(waitMs);
             continue;
         }
-        throw new Error(`Backend responded with status ${status}: ${JSON.stringify(response.result)}`);
+        core.debug(`Backend error ${status}: ${JSON.stringify(response.result)}`);
+        throw new Error(friendlyBackendError(status, response.result));
     }
 }
 
@@ -962,7 +984,7 @@ function buildBlocks(analysis, context) {
             type: 'actions',
             elements: [{
                 type: 'button',
-                text: { type: 'plain_text', text: 'Ver ticket en Jira', emoji: true },
+                text: { type: 'plain_text', text: 'View ticket in Jira', emoji: true },
                 url: context.jiraLink,
                 style: 'primary',
             }],
