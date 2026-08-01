@@ -249,6 +249,17 @@ test('buildReducedPayload: only cosmetic changes → significantCount 0 (client 
     assert.equal(significantCount, 0);
 });
 
+test('buildReducedPayload: collapsed for_each updates union their changed attributes', () => {
+    const plan = {
+        resource_changes: [
+            resource({ address: 'azurerm_static_web_app.sites["a"]', type: 'azurerm_static_web_app', name: 'sites', index: 'a', change: { actions: ['update'], before: { app_settings: 1 }, after: { app_settings: 2 } } }),
+            resource({ address: 'azurerm_static_web_app.sites["b"]', type: 'azurerm_static_web_app', name: 'sites', index: 'b', change: { actions: ['update'], before: { sku: 'Free' }, after: { sku: 'Std' } } }),
+        ],
+    };
+    const { payload } = buildReducedPayload(plan, []);
+    assert.deepEqual(payload.modules[0].resources[0].changed, ['app_settings', 'sku']);
+});
+
 test('groupKey / blockAddress: module vs root, ignoring for_each index', () => {
     assert.equal(blockAddress({ module_address: 'module.cosmos', type: 'azurerm_cosmosdb_account', name: 'this', address: 'module.cosmos.azurerm_cosmosdb_account.this' }), 'module.cosmos.azurerm_cosmosdb_account.this');
     assert.equal(blockAddress({ type: 'azurerm_static_web_app', name: 'sites', address: 'azurerm_static_web_app.sites["a"]' }), 'azurerm_static_web_app.sites');
@@ -292,7 +303,7 @@ test('buildCapacityNotice: null when nothing omitted', () => {
     assert.equal(buildCapacityNotice(null), null);
 });
 
-test('enrichModules: labels multi-instance blocks with a count + breakdown', () => {
+test('enrichModules: a standalone multi-instance block → code + meta header (no subitems)', () => {
     const analysis = { modules: [{ module: 'root.swa', business_impact: 'x', risk: 'y' }] };
     const payloadModules = [{
         module: 'root.swa',
@@ -301,10 +312,12 @@ test('enrichModules: labels multi-instance blocks with a count + breakdown', () 
         resources: [{ address: 'azurerm_static_web_app.sites', instances: 3, action_breakdown: { replace: 0, delete: 1, create: 0, update: 2 }, destroyed_instances: ['legacy'] }],
     }];
     const [mod] = enrichModules(analysis, payloadModules);
-    assert.equal(mod.resources[0].label, 'azurerm_static_web_app.sites ×3 — 1 destroyed, 2 updated (destroyed: legacy)');
+    assert.equal(mod.code, 'azurerm_static_web_app.sites');
+    assert.equal(mod.meta, '×3 — 1 destroyed, 2 updated (destroyed: legacy)');
+    assert.deepEqual(mod.resources, []);
 });
 
-test('enrichModules: labels a single-instance block with the action verb', () => {
+test('enrichModules: a single-instance block → action verb in meta', () => {
     const analysis = { modules: [{ module: 'aws_s3_bucket.logs', business_impact: 'x', risk: 'y' }] };
     const payloadModules = [{
         module: 'aws_s3_bucket.logs',
@@ -313,10 +326,11 @@ test('enrichModules: labels a single-instance block with the action verb', () =>
         resources: [{ address: 'aws_s3_bucket.logs', instances: 1, action_breakdown: { replace: 0, delete: 0, create: 1, update: 0 } }],
     }];
     const [mod] = enrichModules(analysis, payloadModules);
-    assert.equal(mod.resources[0].label, 'aws_s3_bucket.logs (created)');
+    assert.equal(mod.code, 'aws_s3_bucket.logs');
+    assert.equal(mod.meta, '(created)');
 });
 
-test('enrichModules: a single-instance update names the changed attributes', () => {
+test('enrichModules: a single-instance update names the changed attributes in meta', () => {
     const analysis = { modules: [{ module: 'aws_iam_role.app', business_impact: 'x', risk: 'y' }] };
     const payloadModules = [{
         module: 'aws_iam_role.app',
@@ -325,7 +339,7 @@ test('enrichModules: a single-instance update names the changed attributes', () 
         resources: [{ address: 'aws_iam_role.app', instances: 1, action_breakdown: { replace: 0, delete: 0, create: 0, update: 1 }, changed: ['assume_role_policy', 'managed_policy_arns'] }],
     }];
     const [mod] = enrichModules(analysis, payloadModules);
-    assert.equal(mod.resources[0].label, 'aws_iam_role.app (updated: assume_role_policy, managed_policy_arns)');
+    assert.equal(mod.meta, '(updated: assume_role_policy, managed_policy_arns)');
 });
 
 test('enrichModules: caps the changed list at 3 attributes with an ellipsis', () => {
@@ -337,14 +351,27 @@ test('enrichModules: caps the changed list at 3 attributes with an ellipsis', ()
         resources: [{ address: 'aws_x.y', instances: 1, action_breakdown: { replace: 0, delete: 0, create: 0, update: 1 }, changed: ['a', 'b', 'c', 'd'] }],
     }];
     const [mod] = enrichModules(analysis, payloadModules);
-    assert.equal(mod.resources[0].label, 'aws_x.y (updated: a, b, c, …)');
+    assert.equal(mod.meta, '(updated: a, b, c, …)');
 });
 
-test('enrichModules: drops the "module." prefix in the display name', () => {
+test('enrichModules: a module → friendly code (no "module.") + per-resource code/meta subitems', () => {
     const analysis = { modules: [{ module: 'module.cosmos_db', business_impact: 'x', risk: 'y' }] };
-    const payloadModules = [{ module: 'module.cosmos_db', is_module: true, action_breakdown: { replace: 0, delete: 0, create: 2, update: 0 }, resources: [] }];
+    const payloadModules = [{
+        module: 'module.cosmos_db',
+        is_module: true,
+        action_breakdown: { replace: 0, delete: 0, create: 2, update: 0 },
+        resources: [
+            { address: 'module.cosmos_db.azurerm_cosmosdb_account.this', instances: 1, action_breakdown: { replace: 0, delete: 0, create: 1, update: 0 } },
+            { address: 'module.cosmos_db.azurerm_private_endpoint.pe', instances: 1, action_breakdown: { replace: 0, delete: 0, create: 1, update: 0 } },
+        ],
+    }];
     const [mod] = enrichModules(analysis, payloadModules);
-    assert.equal(mod.display, 'cosmos_db');
+    assert.equal(mod.code, 'cosmos_db');
+    assert.equal(mod.meta, '— 2 created');
+    assert.deepEqual(mod.resources, [
+        { code: 'module.cosmos_db.azurerm_cosmosdb_account.this', meta: '(created)' },
+        { code: 'module.cosmos_db.azurerm_private_endpoint.pe', meta: '(created)' },
+    ]);
 });
 
 test('DLP guard: serialized grouped/collapsed payload never contains before/after values', () => {
@@ -386,7 +413,7 @@ const E2E_PLAN = {
         { address: 'module.cosmos_db.azurerm_cosmosdb_account.this', module_address: 'module.cosmos_db', type: 'azurerm_cosmosdb_account', name: 'this', change: { actions: ['create'] } },
         { address: 'module.cosmos_db.azurerm_private_endpoint.pe', module_address: 'module.cosmos_db', type: 'azurerm_private_endpoint', name: 'pe', change: { actions: ['create'] } },
         { address: 'aws_s3_bucket.logs', type: 'aws_s3_bucket', name: 'logs', change: { actions: ['create'] } },
-        { address: 'aws_iam_role.app', type: 'aws_iam_role', name: 'app', change: { actions: ['update'] } },
+        { address: 'aws_iam_role.app', type: 'aws_iam_role', name: 'app', change: { actions: ['update'], before: { assume_role_policy: 'LEAK_policy_old', max_session_duration: 3600 }, after: { assume_role_policy: 'LEAK_policy_new', max_session_duration: 7200 } } },
         { address: 'aws_instance.legacy', type: 'aws_instance', name: 'legacy', change: { actions: ['delete'] } },
         {
             address: 'aws_db_instance.main', type: 'aws_db_instance', name: 'main',
@@ -412,8 +439,8 @@ const E2E_PLAN = {
             address: 'aws_lambda_function.api', type: 'aws_lambda_function', name: 'api',
             change: { actions: ['update'], before: { tags: { Environment: 'LEAK_TAG_dev', Owner: 'LEAK_TAG_alice' } }, after: { tags: { Environment: 'LEAK_TAG_prod', Owner: 'LEAK_TAG_alice' } } },
         },
-        { address: 'azurerm_static_web_app.sites["marketing"]', type: 'azurerm_static_web_app', name: 'sites', index: 'marketing', change: { actions: ['update'] } },
-        { address: 'azurerm_static_web_app.sites["docs"]', type: 'azurerm_static_web_app', name: 'sites', index: 'docs', change: { actions: ['update'] } },
+        { address: 'azurerm_static_web_app.sites["marketing"]', type: 'azurerm_static_web_app', name: 'sites', index: 'marketing', change: { actions: ['update'], before: { app_settings: { API_URL: 'LEAK_marketing_old' } }, after: { app_settings: { API_URL: 'LEAK_marketing_new' } } } },
+        { address: 'azurerm_static_web_app.sites["docs"]', type: 'azurerm_static_web_app', name: 'sites', index: 'docs', change: { actions: ['update'], before: { app_settings: { API_URL: 'LEAK_docs_old' } }, after: { app_settings: { API_URL: 'LEAK_docs_new' } } } },
         { address: 'azurerm_static_web_app.sites["legacy"]', type: 'azurerm_static_web_app', name: 'sites', index: 'legacy', change: { actions: ['delete'] } },
     ],
 };
@@ -435,6 +462,10 @@ test('E2E scenario: 10 significant instances across 7 groups, 2 cosmetic, read/n
     assert.equal(swa.resources[0].instances, 3);
     assert.deepEqual(swa.resources[0].action_breakdown, { replace: 0, delete: 1, create: 0, update: 2 });
     assert.deepEqual(swa.resources[0].destroyed_instances, ['legacy']);
+    // The bulk update's changed attributes are unioned across the updated instances.
+    assert.deepEqual(swa.resources[0].changed, ['app_settings']);
+    const iam = moduleByName(payload, 'aws_iam_role.app');
+    assert.deepEqual(iam.resources[0].changed, ['assume_role_policy', 'max_session_duration']);
 
     // The relevant tag promoted the lambda to significant.
     const lambda = moduleByName(payload, 'aws_lambda_function.api');

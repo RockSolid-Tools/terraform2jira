@@ -42,7 +42,11 @@ jobs:
                 "address": "aws_iam_role.app",
                 "type": "aws_iam_role",
                 "name": "app",
-                "change": { "actions": ["update"] }
+                "change": {
+                  "actions": ["update"],
+                  "before": { "assume_role_policy": "LEAK_policy_old", "max_session_duration": 3600 },
+                  "after": { "assume_role_policy": "LEAK_policy_new", "max_session_duration": 7200 }
+                }
               },
               {
                 "address": "aws_instance.legacy",
@@ -109,14 +113,22 @@ jobs:
                 "type": "azurerm_static_web_app",
                 "name": "sites",
                 "index": "marketing",
-                "change": { "actions": ["update"] }
+                "change": {
+                  "actions": ["update"],
+                  "before": { "app_settings": { "API_URL": "LEAK_marketing_old" } },
+                  "after": { "app_settings": { "API_URL": "LEAK_marketing_new" } }
+                }
               },
               {
                 "address": "azurerm_static_web_app.sites[\"docs\"]",
                 "type": "azurerm_static_web_app",
                 "name": "sites",
                 "index": "docs",
-                "change": { "actions": ["update"] }
+                "change": {
+                  "actions": ["update"],
+                  "before": { "app_settings": { "API_URL": "LEAK_docs_old" } },
+                  "after": { "app_settings": { "API_URL": "LEAK_docs_new" } }
+                }
               },
               {
                 "address": "azurerm_static_web_app.sites[\"legacy\"]",

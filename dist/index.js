@@ -31,16 +31,9 @@ function buildMarkdown(analysis, context) {
         lines.push('', '**Changes**');
         analysis.modules.forEach((mod, i) => {
             if (i > 0) lines.push('', '---');
-            if (mod.is_module) {
-                const header = mod.action_summary ? `${mod.display} — ${mod.action_summary}` : mod.display;
-                lines.push('', `**${header}**`);
-                if (mod.business_impact) lines.push(mod.business_impact);
-                (mod.resources || []).forEach((r) => lines.push(`- \`${r.label}\``));
-            } else {
-                const r = (mod.resources && mod.resources[0]) || { label: mod.module };
-                lines.push('', `**\`${r.label}\`**`);
-                if (mod.business_impact) lines.push(mod.business_impact);
-            }
+            lines.push('', mod.meta ? `**\`${mod.code}\`** ${mod.meta}` : `**\`${mod.code}\`**`);
+            if (mod.business_impact) lines.push(mod.business_impact);
+            (mod.resources || []).forEach((r) => lines.push(`- \`${r.code}\` ${r.meta}`));
             if (mod.risk) lines.push(`_Risk: ${mod.risk}_`);
         });
     }
@@ -177,21 +170,14 @@ function buildAdf(analysis, capacityNotice) {
         content.push(heading(4, 'Changes'));
         analysis.modules.forEach((mod, i) => {
             if (i > 0) content.push({ type: 'rule' });
-            if (mod.is_module) {
-                const header = mod.action_summary ? `${mod.display} — ${mod.action_summary}` : mod.display;
-                content.push(paragraph(strongNode(header)));
-                if (mod.business_impact) {
-                    content.push(paragraph(textNode(mod.business_impact)));
-                }
-                if (Array.isArray(mod.resources) && mod.resources.length) {
-                    content.push(bulletList(mod.resources.map((r) => textNode(r.label))));
-                }
-            } else {
-                const r = (mod.resources && mod.resources[0]) || { label: mod.module };
-                content.push(paragraph([
-                    strongNode(`${r.label}: `),
-                    textNode(mod.business_impact || ''),
-                ]));
+            const title = [strongNode(mod.code)];
+            if (mod.meta) title.push(textNode(` ${mod.meta}`));
+            content.push(paragraph(title));
+            if (mod.business_impact) {
+                content.push(paragraph(textNode(mod.business_impact)));
+            }
+            if (mod.resources.length) {
+                content.push(bulletList(mod.resources.map((r) => textNode(`${r.code} ${r.meta}`))));
             }
             if (mod.risk) {
                 content.push(paragraph([strongNode('Risk: '), textNode(mod.risk)]));
@@ -640,7 +626,10 @@ const ACTION_WORD = { replace: 'recreated', delete: 'destroyed', create: 'create
 // with multiple instances shows the count + full breakdown so mixed actions (e.g. one
 // delete among many updates) are always visible, and names the specific instances hit
 // by a destructive action.
-function resourceLabel(entry) {
+// Action/instance text for a resource block, WITHOUT the address (the formatters
+// render the address separately in code style). Collapses count/for_each iterations
+// and names the instances hit by a destructive action.
+function resourceMeta(entry) {
     const bd = entry.action_breakdown || {};
     const instances = entry.instances || 1;
     const changed = Array.isArray(entry.changed) ? entry.changed : [];
@@ -649,7 +638,6 @@ function resourceLabel(entry) {
         : '';
 
     if (instances > 1) {
-        const label = `${entry.address} \u00d7${instances} \u2014 ${breakdownLabel(bd)}`;
         const notable = [];
         if (entry.recreated_instances && entry.recreated_instances.length) {
             notable.push(`recreated: ${entry.recreated_instances.join(', ')}`);
@@ -660,32 +648,41 @@ function resourceLabel(entry) {
         if (changedText) {
             notable.push(`changed: ${changedText}`);
         }
-        return notable.length ? `${label} (${notable.join('; ')})` : label;
+        const base = `\u00d7${instances} \u2014 ${breakdownLabel(bd)}`;
+        return notable.length ? `${base} (${notable.join('; ')})` : base;
     }
     const action = ['replace', 'delete', 'create', 'update'].find((k) => bd[k] > 0);
     if (action === 'update' && changedText) {
-        return `${entry.address} (updated: ${changedText})`;
+        return `(updated: ${changedText})`;
     }
-    return `${entry.address} (${ACTION_WORD[action] || 'updated'})`;
+    return `(${ACTION_WORD[action] || 'updated'})`;
 }
 
-// Merges the LLM's per-module narrative with the deterministic resource list and
-// action breakdown the client already computed, so sub-resources/counts are exact
-// (the LLM only writes the business impact + risk per module).
+// Merges the LLM's per-module narrative with the deterministic identifiers the client
+// already computed. Emits a uniform header ({ code: identifier, meta: action text }) for
+// both modules and standalone resources, plus per-resource {code, meta} for modules — so
+// every channel renders the identifier in code style and the action as plain text.
 function enrichModules(analysis, payloadModules) {
     const byName = new Map((payloadModules || []).map((m) => [m.module, m]));
     const llmModules = Array.isArray(analysis.modules) ? analysis.modules : [];
     return llmModules.map((m) => {
-        const data = byName.get(m.module) || { resources: [], action_breakdown: {} };
+        const data = byName.get(m.module) || { resources: [], action_breakdown: {}, is_module: false };
+        const isModule = Boolean(data.is_module);
+        const first = (data.resources && data.resources[0]) || { address: m.module, action_breakdown: {} };
+        const summary = breakdownLabel(data.action_breakdown);
         return {
             module: m.module,
-            // Friendlier header: drop the "module." prefix (keep exact addresses in subitems).
-            display: m.module.startsWith('module.') ? m.module.slice('module.'.length) : m.module,
-            is_module: Boolean(data.is_module),
+            is_module: isModule,
             business_impact: m.business_impact,
             risk: m.risk,
-            action_summary: breakdownLabel(data.action_breakdown),
-            resources: (data.resources || []).map((r) => ({ label: resourceLabel(r) })),
+            // Header: module → friendly name ("module." stripped); singleton → resource address.
+            code: isModule
+                ? (m.module.startsWith('module.') ? m.module.slice('module.'.length) : m.module)
+                : first.address,
+            meta: isModule ? (summary ? `\u2014 ${summary}` : '') : resourceMeta(first),
+            resources: isModule
+                ? (data.resources || []).map((r) => ({ code: r.address, meta: resourceMeta(r) }))
+                : [],
         };
     });
 }
@@ -867,20 +864,12 @@ function buildBlocks(analysis, context) {
     if (Array.isArray(analysis.modules) && analysis.modules.length) {
         analysis.modules.forEach((mod, i) => {
             if (i > 0) blocks.push({ type: 'divider' });
-            const lines = [];
-            if (mod.is_module) {
-                const header = mod.action_summary ? `${mod.display} — ${mod.action_summary}` : mod.display;
-                lines.push(`*${header}*`);
-                if (mod.business_impact) lines.push(mod.business_impact);
-                const resList = (mod.resources || [])
-                    .map((r) => `• \`${r.label}\``)
-                    .join('\n');
-                if (resList) lines.push(resList);
-            } else {
-                const r = (mod.resources && mod.resources[0]) || { label: mod.module };
-                lines.push(`*\`${r.label}\`*`);
-                if (mod.business_impact) lines.push(mod.business_impact);
-            }
+            const lines = [mod.meta ? `*\`${mod.code}\`* ${mod.meta}` : `*\`${mod.code}\`*`];
+            if (mod.business_impact) lines.push(mod.business_impact);
+            const resList = (mod.resources || [])
+                .map((r) => `• \`${r.code}\` ${r.meta}`)
+                .join('\n');
+            if (resList) lines.push(resList);
             if (mod.risk) lines.push(`*Risk:* ${mod.risk}`);
             blocks.push(section(lines.join('\n')));
         });
