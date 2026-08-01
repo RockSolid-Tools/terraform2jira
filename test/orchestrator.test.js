@@ -134,7 +134,7 @@ test('buildReducedPayload: groups a module_address together; root resources are 
     const cosmos = moduleByName(payload, 'module.cosmos');
     assert.equal(cosmos.is_module, true);
     assert.equal(cosmos.resources.length, 2);
-    assert.deepEqual(cosmos.action_breakdown, { replace: 0, delete: 0, create: 2, update: 0 });
+    assert.deepEqual(cosmos.action_breakdown, { replace: 0, delete: 0, create: 2, import: 0, update: 0 });
     const root = moduleByName(payload, 'aws_s3_bucket.logs');
     assert.equal(root.is_module, false);
     assert.equal(root.resources.length, 1);
@@ -155,7 +155,7 @@ test('buildReducedPayload: collapses count/for_each iterations into one entry wi
     assert.equal(group.resources.length, 1);
     assert.equal(group.resources[0].address, 'azurerm_static_web_app.sites');
     assert.equal(group.resources[0].instances, 3);
-    assert.deepEqual(group.resources[0].action_breakdown, { replace: 0, delete: 0, create: 0, update: 3 });
+    assert.deepEqual(group.resources[0].action_breakdown, { replace: 0, delete: 0, create: 0, import: 0, update: 3 });
 });
 
 test('buildReducedPayload: a single changed for_each instance keeps its indexed address', () => {
@@ -181,7 +181,7 @@ test('buildReducedPayload: mixed actions across iterations are all preserved (a 
     const { payload } = buildReducedPayload(plan, []);
     const entry = payload.modules[0].resources[0];
     assert.equal(entry.instances, 3);
-    assert.deepEqual(entry.action_breakdown, { replace: 0, delete: 1, create: 0, update: 2 });
+    assert.deepEqual(entry.action_breakdown, { replace: 0, delete: 1, create: 0, import: 0, update: 2 });
     assert.deepEqual(entry.destroyed_instances, ['gone']);
 });
 
@@ -475,7 +475,7 @@ test('E2E scenario: 10 significant instances across 7 groups, 2 cosmetic, read/n
     // The 3 static web apps collapse into one block with the lone delete preserved.
     const swa = moduleByName(payload, 'azurerm_static_web_app.sites');
     assert.equal(swa.resources[0].instances, 3);
-    assert.deepEqual(swa.resources[0].action_breakdown, { replace: 0, delete: 1, create: 0, update: 2 });
+    assert.deepEqual(swa.resources[0].action_breakdown, { replace: 0, delete: 1, create: 0, import: 0, update: 2 });
     assert.deepEqual(swa.resources[0].destroyed_instances, ['legacy']);
     // The bulk update's changed attributes are unioned across the updated instances.
     assert.deepEqual(swa.resources[0].changed, ['app_settings']);
@@ -497,4 +497,103 @@ test('E2E scenario: 10 significant instances across 7 groups, 2 cosmetic, read/n
 test('E2E scenario: DLP holds on the full plan (no LEAK_ values leak)', () => {
     const { payload } = buildReducedPayload(E2E_PLAN, ['Environment', 'CostCenter']);
     assert.doesNotMatch(JSON.stringify(payload), /LEAK_/);
+});
+
+// --- Additional plan-shape scenarios ---------------------------------------
+
+test('buildReducedPayload: replace detected regardless of action order (create_before_destroy)', () => {
+    const plan = {
+        resource_changes: [
+            { address: 'aws_db_instance.main', type: 'aws_db_instance', name: 'main', change: { actions: ['create', 'delete'] } },
+        ]
+    };
+    const { payload, significantCount } = buildReducedPayload(plan, []);
+    assert.equal(significantCount, 1);
+    assert.deepEqual(payload.modules[0].resources[0].action_breakdown, { replace: 1, delete: 0, create: 0, import: 0, update: 0 });
+});
+
+test('buildReducedPayload: action_reason is captured and forwarded', () => {
+    const plan = {
+        resource_changes: [
+            { address: 'aws_instance.web', type: 'aws_instance', name: 'web', action_reason: 'replace_because_tainted', change: { actions: ['delete', 'create'] } },
+        ]
+    };
+    const { payload } = buildReducedPayload(plan, []);
+    assert.deepEqual(payload.modules[0].resources[0].action_reason, ['replace_because_tainted']);
+});
+
+test('buildReducedPayload: empty plan yields nothing significant (client skips backend)', () => {
+    const { significantCount, cosmeticCount, payload } = buildReducedPayload({ resource_changes: [] }, []);
+    assert.equal(significantCount, 0);
+    assert.equal(cosmeticCount, 0);
+    assert.equal(payload.modules.length, 0);
+});
+
+test('buildReducedPayload: whole-module deletion groups all its resources as deletes', () => {
+    const plan = {
+        resource_changes: [
+            { address: 'module.legacy.aws_instance.a', module_address: 'module.legacy', type: 'aws_instance', name: 'a', change: { actions: ['delete'] } },
+            { address: 'module.legacy.aws_ebs_volume.b', module_address: 'module.legacy', type: 'aws_ebs_volume', name: 'b', change: { actions: ['delete'] } },
+        ]
+    };
+    const { payload, moduleCount } = buildReducedPayload(plan, []);
+    assert.equal(moduleCount, 1);
+    assert.equal(payload.modules[0].module, 'module.legacy');
+    assert.deepEqual(payload.modules[0].action_breakdown, { replace: 0, delete: 2, create: 0, import: 0, update: 0 });
+    assert.equal(payload.modules[0].resources.length, 2);
+});
+
+test('buildReducedPayload: a large plan (500 distinct blocks) sends all and stays under the 256KB byte guard', () => {
+    const changes = [];
+    for (let i = 0; i < 500; i += 1) {
+        changes.push({ address: `aws_instance.node_${i}`, type: 'aws_instance', name: `node_${i}`, change: { actions: ['update'], before: { ami: 'a' }, after: { ami: 'b' } } });
+    }
+    const { payload, significantCount, moduleCount } = buildReducedPayload({ format_version: '1.2', terraform_version: '1.9.0', resource_changes: changes }, []);
+    assert.equal(significantCount, 500);
+    assert.equal(moduleCount, 500);
+    const bytes = Buffer.byteLength(JSON.stringify(payload));
+    assert.ok(bytes < 256 * 1024, `payload is ${bytes} bytes, expected < 262144`);
+});
+
+// --- Import handling --------------------------------------------------------
+
+test('buildReducedPayload: an import (no-op + change.importing) is surfaced, not dropped, and DLP-safe', () => {
+    const plan = {
+        resource_changes: [
+            { address: 'aws_s3_bucket.adopted', type: 'aws_s3_bucket', name: 'adopted', change: { actions: ['no-op'], importing: { id: 'LEAK_bucket_arn' } } },
+        ]
+    };
+    const { payload, significantCount } = buildReducedPayload(plan, []);
+    assert.equal(significantCount, 1);
+    assert.deepEqual(payload.modules[0].resources[0].action_breakdown, { replace: 0, delete: 0, create: 0, import: 1, update: 0 });
+    assert.doesNotMatch(JSON.stringify(payload), /LEAK_/);
+});
+
+test('buildReducedPayload: import groups rank below create and above update', () => {
+    const plan = {
+        resource_changes: [
+            { address: 'aws_x.upd', type: 'aws_x', name: 'upd', change: { actions: ['update'], before: { a: 1 }, after: { a: 2 } } },
+            { address: 'aws_y.imp', type: 'aws_y', name: 'imp', change: { actions: ['no-op'], importing: { id: 'i' } } },
+            { address: 'aws_z.cre', type: 'aws_z', name: 'cre', change: { actions: ['create'] } },
+        ]
+    };
+    const { payload } = buildReducedPayload(plan, []);
+    assert.deepEqual(payload.modules.map((m) => m.module), ['aws_z.cre', 'aws_y.imp', 'aws_x.upd']);
+});
+
+test('overviewLine: imported ranks between created and updated', () => {
+    const modules = [{ module: 'a', action_breakdown: { replace: 0, delete: 0, create: 1, import: 2, update: 3 } }];
+    assert.equal(overviewLine(modules), '1 created \u00b7 2 imported \u00b7 3 updated');
+});
+
+test('enrichModules: a single import block → (imported) meta', () => {
+    const analysis = { modules: [{ module: 'aws_s3_bucket.adopted', business_impact: 'x', risk: 'y' }] };
+    const payloadModules = [{
+        module: 'aws_s3_bucket.adopted',
+        is_module: false,
+        action_breakdown: { replace: 0, delete: 0, create: 0, import: 1, update: 0 },
+        resources: [{ address: 'aws_s3_bucket.adopted', instances: 1, action_breakdown: { replace: 0, delete: 0, create: 0, import: 1, update: 0 } }],
+    }];
+    const [mod] = enrichModules(analysis, payloadModules);
+    assert.equal(mod.meta, '(imported)');
 });
