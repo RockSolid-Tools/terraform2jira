@@ -9,6 +9,7 @@ const {
     groupKey,
     blockAddress,
     enrichModules,
+    overviewLine,
 } = require('../lib/orchestrator');
 
 // Helper to build a resource_change entry quickly.
@@ -258,6 +259,20 @@ test('buildReducedPayload: collapsed for_each updates union their changed attrib
     };
     const { payload } = buildReducedPayload(plan, []);
     assert.deepEqual(payload.modules[0].resources[0].changed, ['app_settings', 'sku']);
+});
+
+test('overviewLine: sums action breakdowns across groups (instance counts)', () => {
+    const modules = [
+        { module: 'a', action_breakdown: { replace: 0, delete: 1, create: 0, update: 2 } },
+        { module: 'b', action_breakdown: { replace: 1, delete: 1, create: 3, update: 1 } },
+    ];
+    assert.equal(overviewLine(modules), '3 created · 1 recreated · 2 destroyed · 3 updated (2 groups)');
+});
+
+test('overviewLine: singular group label and empty when nothing', () => {
+    assert.equal(overviewLine([{ module: 'a', action_breakdown: { replace: 0, delete: 0, create: 1, update: 0 } }]), '1 created (1 group)');
+    assert.equal(overviewLine([]), '');
+    assert.equal(overviewLine(undefined), '');
 });
 
 test('groupKey / blockAddress: module vs root, ignoring for_each index', () => {

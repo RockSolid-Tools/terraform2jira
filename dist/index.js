@@ -23,19 +23,12 @@ function buildMarkdown(analysis, context) {
         `**Severity:** ${SEVERITY_EMOJI[severity] || ''} ${severity}  ·  **Cost:** ${costText}`,
     ];
 
-    if (context && context.capacityNotice) {
-        lines.push('', `> ℹ️ ${context.capacityNotice}`);
+    if (analysis.overview) {
+        lines.push('', `**Overview:** ${analysis.overview}`);
     }
 
-    if (Array.isArray(analysis.modules) && analysis.modules.length) {
-        lines.push('', '**Changes**');
-        analysis.modules.forEach((mod, i) => {
-            if (i > 0) lines.push('', '---');
-            lines.push('', mod.meta ? `**\`${mod.code}\`** ${mod.meta}` : `**\`${mod.code}\`**`);
-            if (mod.business_impact) lines.push(mod.business_impact);
-            (mod.resources || []).forEach((r) => lines.push(`- \`${r.code}\` ${r.meta}`));
-            if (mod.risk) lines.push(`_Risk: ${mod.risk}_`);
-        });
+    if (context && context.capacityNotice) {
+        lines.push('', `> ℹ️ ${context.capacityNotice}`);
     }
 
     if (Array.isArray(analysis.risks) && analysis.risks.length) {
@@ -46,6 +39,19 @@ function buildMarkdown(analysis, context) {
     if (Array.isArray(analysis.recommendations) && analysis.recommendations.length) {
         lines.push('', '**Recommendations**');
         analysis.recommendations.forEach((r) => lines.push(`- ${r}`));
+    }
+
+    // Full per-resource detail, collapsed behind a native <details> toggle.
+    if (Array.isArray(analysis.modules) && analysis.modules.length) {
+        lines.push('', '<details>', '<summary>Details — resource changes</summary>', '');
+        analysis.modules.forEach((mod, i) => {
+            if (i > 0) lines.push('', '---');
+            lines.push('', mod.meta ? `**\`${mod.code}\`** ${mod.meta}` : `**\`${mod.code}\`**`);
+            if (mod.business_impact) lines.push(mod.business_impact);
+            (mod.resources || []).forEach((r) => lines.push(`- \`${r.code}\` ${r.meta}`));
+            if (mod.risk) lines.push(`_Risk: ${mod.risk}_`);
+        });
+        lines.push('', '</details>');
     }
 
     if (context && context.jiraLink) {
@@ -166,23 +172,8 @@ function buildAdf(analysis, capacityNotice) {
         content.push(paragraph({ type: 'text', text: `ℹ️ ${capacityNotice}`, marks: [{ type: 'em' }] }));
     }
 
-    if (Array.isArray(analysis.modules) && analysis.modules.length) {
-        content.push(heading(4, 'Changes'));
-        analysis.modules.forEach((mod, i) => {
-            if (i > 0) content.push({ type: 'rule' });
-            const title = [strongNode(mod.code)];
-            if (mod.meta) title.push(textNode(` ${mod.meta}`));
-            content.push(paragraph(title));
-            if (mod.business_impact) {
-                content.push(paragraph(textNode(mod.business_impact)));
-            }
-            if (mod.resources.length) {
-                content.push(bulletList(mod.resources.map((r) => textNode(`${r.code} ${r.meta}`))));
-            }
-            if (mod.risk) {
-                content.push(paragraph([strongNode('Risk: '), textNode(mod.risk)]));
-            }
-        });
+    if (analysis.overview) {
+        content.push(paragraph([strongNode('Overview: '), textNode(analysis.overview)]));
     }
 
     if (Array.isArray(analysis.risks) && analysis.risks.length) {
@@ -193,6 +184,27 @@ function buildAdf(analysis, capacityNotice) {
     if (Array.isArray(analysis.recommendations) && analysis.recommendations.length) {
         content.push(heading(4, 'Recommendations'));
         content.push(bulletList(analysis.recommendations.map((rec) => textNode(rec))));
+    }
+
+    // Full per-resource detail, collapsed inside a native ADF expand block.
+    if (Array.isArray(analysis.modules) && analysis.modules.length) {
+        const details = [];
+        analysis.modules.forEach((mod, i) => {
+            if (i > 0) details.push({ type: 'rule' });
+            const title = [strongNode(mod.code)];
+            if (mod.meta) title.push(textNode(` ${mod.meta}`));
+            details.push(paragraph(title));
+            if (mod.business_impact) {
+                details.push(paragraph(textNode(mod.business_impact)));
+            }
+            if (mod.resources.length) {
+                details.push(bulletList(mod.resources.map((r) => textNode(`${r.code} ${r.meta}`))));
+            }
+            if (mod.risk) {
+                details.push(paragraph([strongNode('Risk: '), textNode(mod.risk)]));
+            }
+        });
+        content.push({ type: 'expand', attrs: { title: 'Details — resource changes' }, content: details });
     }
 
     return { version: 1, type: 'doc', content };
@@ -654,6 +666,30 @@ function breakdownLabel(breakdown) {
     return parts.join(', ');
 }
 
+// Deterministic one-line overview summing the action breakdowns across all groups
+// (instance-level counts), e.g. "3 created · 1 recreated · 2 destroyed · 4 updated
+// (7 groups)". The "brief without losing info" backbone of the executive view.
+function overviewLine(payloadModules) {
+    const modules = Array.isArray(payloadModules) ? payloadModules : [];
+    const total = { replace: 0, delete: 0, create: 0, update: 0 };
+    for (const m of modules) {
+        const bd = m.action_breakdown || {};
+        total.replace += bd.replace || 0;
+        total.delete += bd.delete || 0;
+        total.create += bd.create || 0;
+        total.update += bd.update || 0;
+    }
+    const parts = [];
+    if (total.create) parts.push(`${total.create} created`);
+    if (total.replace) parts.push(`${total.replace} recreated`);
+    if (total.delete) parts.push(`${total.delete} destroyed`);
+    if (total.update) parts.push(`${total.update} updated`);
+    if (!parts.length) {
+        return '';
+    }
+    return `${parts.join(' \u00b7 ')} (${modules.length} group${modules.length === 1 ? '' : 's'})`;
+}
+
 // Verb for a block with a single action category (single, non-iterated resource).
 const ACTION_WORD = { replace: 'recreated', delete: 'destroyed', create: 'created', update: 'updated' };
 
@@ -747,7 +783,7 @@ function buildCapacityNotice(changeSummary) {
 async function distribute(analysis, httpClient, event, changeSummary, payloadModules) {
     const failOnError = core.getInput('fail_on_error', { required: false }) === 'true';
     const capacityNotice = buildCapacityNotice(changeSummary);
-    const analysisView = { ...analysis, modules: enrichModules(analysis, payloadModules) };
+    const analysisView = { ...analysis, modules: enrichModules(analysis, payloadModules), overview: overviewLine(payloadModules) };
 
     const jiraCfg = {
         baseUrl: core.getInput('jira_base_url', { required: false }),
@@ -848,6 +884,7 @@ module.exports = {
     groupKey,
     blockAddress,
     enrichModules,
+    overviewLine,
 };
 
 
@@ -896,7 +933,23 @@ function buildBlocks(analysis, context) {
         blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `ℹ️ ${context.capacityNotice}` }] });
     }
 
+    if (analysis.overview) {
+        blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `*Overview:* ${analysis.overview}` }] });
+    }
+
+    if (Array.isArray(analysis.risks) && analysis.risks.length) {
+        blocks.push(section(`*Risks*\n${analysis.risks.map((r) => `• ${r}`).join('\n')}`));
+    }
+
+    if (Array.isArray(analysis.recommendations) && analysis.recommendations.length) {
+        blocks.push(section(`*Recommendations*\n${analysis.recommendations.map((r) => `• ${r}`).join('\n')}`));
+    }
+
+    // Full per-resource detail (Slack Incoming Webhooks can't collapse; a divider +
+    // header marks the section, and Slack auto-truncates long messages with "Show more").
     if (Array.isArray(analysis.modules) && analysis.modules.length) {
+        blocks.push({ type: 'divider' });
+        blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '*Details — resource changes*' }] });
         analysis.modules.forEach((mod, i) => {
             if (i > 0) blocks.push({ type: 'divider' });
             const lines = [mod.meta ? `*\`${mod.code}\`* ${mod.meta}` : `*\`${mod.code}\`*`];
@@ -908,14 +961,6 @@ function buildBlocks(analysis, context) {
             if (mod.risk) lines.push(`*Risk:* ${mod.risk}`);
             blocks.push(section(lines.join('\n')));
         });
-    }
-
-    if (Array.isArray(analysis.risks) && analysis.risks.length) {
-        blocks.push(section(`*Risks*\n${analysis.risks.map((r) => `• ${r}`).join('\n')}`));
-    }
-
-    if (Array.isArray(analysis.recommendations) && analysis.recommendations.length) {
-        blocks.push(section(`*Recommendations*\n${analysis.recommendations.map((r) => `• ${r}`).join('\n')}`));
     }
 
     // URL button linking to the Jira ticket (works with Incoming Webhooks)
