@@ -19,6 +19,20 @@ jobs:
             "terraform_version": "1.9.0",
             "resource_changes": [
               {
+                "address": "module.cosmos_db.azurerm_cosmosdb_account.this",
+                "module_address": "module.cosmos_db",
+                "type": "azurerm_cosmosdb_account",
+                "name": "this",
+                "change": { "actions": ["create"] }
+              },
+              {
+                "address": "module.cosmos_db.azurerm_private_endpoint.pe",
+                "module_address": "module.cosmos_db",
+                "type": "azurerm_private_endpoint",
+                "name": "pe",
+                "change": { "actions": ["create"] }
+              },
+              {
                 "address": "aws_s3_bucket.logs",
                 "type": "aws_s3_bucket",
                 "name": "logs",
@@ -89,6 +103,27 @@ jobs:
                   "before": { "tags": { "Environment": "LEAK_TAG_dev", "Owner": "LEAK_TAG_alice" } },
                   "after": { "tags": { "Environment": "LEAK_TAG_prod", "Owner": "LEAK_TAG_alice" } }
                 }
+              },
+              {
+                "address": "azurerm_static_web_app.sites[\"marketing\"]",
+                "type": "azurerm_static_web_app",
+                "name": "sites",
+                "index": "marketing",
+                "change": { "actions": ["update"] }
+              },
+              {
+                "address": "azurerm_static_web_app.sites[\"docs\"]",
+                "type": "azurerm_static_web_app",
+                "name": "sites",
+                "index": "docs",
+                "change": { "actions": ["update"] }
+              },
+              {
+                "address": "azurerm_static_web_app.sites[\"legacy\"]",
+                "type": "azurerm_static_web_app",
+                "name": "sites",
+                "index": "legacy",
+                "change": { "actions": ["delete"] }
               }
             ]
           }

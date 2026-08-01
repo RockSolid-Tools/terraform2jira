@@ -6,6 +6,9 @@ const {
     changedAttributes,
     changedTagKeys,
     buildCapacityNotice,
+    groupKey,
+    blockAddress,
+    enrichModules,
 } = require('../lib/orchestrator');
 
 // Helper to build a resource_change entry quickly.
@@ -19,11 +22,15 @@ function resource(overrides) {
     };
 }
 
+function moduleByName(payload, name) {
+    return payload.modules.find((m) => m.module === name);
+}
+
 test('buildReducedPayload: tag-only update is bundled as cosmetic, not sent', () => {
     const plan = {
         resource_changes: [
             resource({
-                address: 'aws_s3_bucket.a',
+                address: 'aws_s3_bucket.a', type: 'aws_s3_bucket', name: 'a',
                 change: {
                     actions: ['update'],
                     before: { tags: { Owner: 'alice' } },
@@ -35,10 +42,13 @@ test('buildReducedPayload: tag-only update is bundled as cosmetic, not sent', ()
     const { payload, significantCount, cosmeticCount } = buildReducedPayload(plan, []);
     assert.equal(significantCount, 0);
     assert.equal(cosmeticCount, 1);
-    assert.equal(payload.resource_changes.length, 0);
-    assert.equal(payload.change_summary.cosmetic_omitted, 1);
-    assert.equal(payload.change_summary.significant_total, 0);
-    assert.equal(payload.change_summary.total_changes, 1);
+    assert.equal(payload.modules.length, 0);
+    assert.deepEqual(payload.change_summary, {
+        total_changes: 1,
+        cosmetic_omitted: 1,
+        significant_total: 0,
+        modules_total: 0,
+    });
 });
 
 test('buildReducedPayload: tags_all-only update is also cosmetic', () => {
@@ -62,7 +72,7 @@ test('buildReducedPayload: relevant tag promotes a tag-only update to significan
     const plan = {
         resource_changes: [
             resource({
-                address: 'aws_s3_bucket.a',
+                address: 'aws_s3_bucket.a', type: 'aws_s3_bucket', name: 'a',
                 change: {
                     actions: ['update'],
                     before: { tags: { Environment: 'dev', Owner: 'alice' } },
@@ -74,8 +84,8 @@ test('buildReducedPayload: relevant tag promotes a tag-only update to significan
     const { payload, significantCount, cosmeticCount } = buildReducedPayload(plan, ['Environment']);
     assert.equal(significantCount, 1);
     assert.equal(cosmeticCount, 0);
-    assert.equal(payload.resource_changes.length, 1);
-    assert.deepEqual(payload.resource_changes[0].changed, ['tags.Environment']);
+    assert.equal(payload.modules.length, 1);
+    assert.deepEqual(payload.modules[0].resources[0].changed, ['tags.Environment']);
 });
 
 test('buildReducedPayload: relevant_tags only promotes when the relevant key actually changed', () => {
@@ -90,7 +100,6 @@ test('buildReducedPayload: relevant_tags only promotes when the relevant key act
             }),
         ],
     };
-    // Owner changed (not relevant); Environment did not change → stays cosmetic.
     const { significantCount, cosmeticCount } = buildReducedPayload(plan, ['Environment']);
     assert.equal(significantCount, 0);
     assert.equal(cosmeticCount, 1);
@@ -107,44 +116,126 @@ test('buildReducedPayload: no-op and read changes are discarded entirely', () =>
     assert.equal(significantCount, 0);
     assert.equal(cosmeticCount, 0);
     assert.equal(totalCount, 2);
+    assert.equal(payload.modules.length, 0);
     assert.equal(payload.change_summary.total_changes, 0);
 });
 
-test('buildReducedPayload: sorts delete/replace > create > update', () => {
+test('buildReducedPayload: groups a module_address together; root resources are singletons', () => {
     const plan = {
         resource_changes: [
-            resource({ address: 'u', change: { actions: ['update'], before: { size: 1 }, after: { size: 2 } } }),
-            resource({ address: 'c', change: { actions: ['create'] } }),
-            resource({ address: 'r', change: { actions: ['delete', 'create'] } }),
-            resource({ address: 'd', change: { actions: ['delete'] } }),
+            resource({ address: 'module.cosmos.azurerm_cosmosdb_account.this', module_address: 'module.cosmos', type: 'azurerm_cosmosdb_account', name: 'this', change: { actions: ['create'] } }),
+            resource({ address: 'module.cosmos.azurerm_private_endpoint.pe', module_address: 'module.cosmos', type: 'azurerm_private_endpoint', name: 'pe', change: { actions: ['create'] } }),
+            resource({ address: 'aws_s3_bucket.logs', type: 'aws_s3_bucket', name: 'logs', change: { actions: ['create'] } }),
+        ],
+    };
+    const { payload, moduleCount } = buildReducedPayload(plan, []);
+    assert.equal(moduleCount, 2);
+    const cosmos = moduleByName(payload, 'module.cosmos');
+    assert.equal(cosmos.is_module, true);
+    assert.equal(cosmos.resources.length, 2);
+    assert.deepEqual(cosmos.action_breakdown, { replace: 0, delete: 0, create: 2, update: 0 });
+    const root = moduleByName(payload, 'aws_s3_bucket.logs');
+    assert.equal(root.is_module, false);
+    assert.equal(root.resources.length, 1);
+});
+
+test('buildReducedPayload: collapses count/for_each iterations into one entry with an instance count', () => {
+    const plan = {
+        resource_changes: ['a', 'b', 'c'].map((k) => resource({
+            address: `azurerm_static_web_app.sites["${k}"]`,
+            type: 'azurerm_static_web_app', name: 'sites', index: k,
+            change: { actions: ['update'], before: { sku: 'Free' }, after: { sku: 'Standard' } },
+        })),
+    };
+    const { payload, significantCount, moduleCount } = buildReducedPayload(plan, []);
+    assert.equal(significantCount, 3);
+    assert.equal(moduleCount, 1);
+    const group = payload.modules[0];
+    assert.equal(group.resources.length, 1);
+    assert.equal(group.resources[0].address, 'azurerm_static_web_app.sites');
+    assert.equal(group.resources[0].instances, 3);
+    assert.deepEqual(group.resources[0].action_breakdown, { replace: 0, delete: 0, create: 0, update: 3 });
+});
+
+test('buildReducedPayload: a single changed for_each instance keeps its indexed address', () => {
+    const plan = {
+        resource_changes: [
+            resource({ address: 'azurerm_container_app.this["app3"]', type: 'azurerm_container_app', name: 'this', index: 'app3', change: { actions: ['update'], before: { env: 'a' }, after: { env: 'b' } } }),
         ],
     };
     const { payload } = buildReducedPayload(plan, []);
-    const order = payload.resource_changes.map((r) => r.address);
-    // delete + replace (rank 0) come first, then create (rank 1), then update (rank 2).
-    assert.equal(order[order.length - 1], 'u');
-    assert.ok(order.indexOf('c') < order.indexOf('u'));
-    assert.ok(order.indexOf('d') < order.indexOf('c'));
-    assert.ok(order.indexOf('r') < order.indexOf('c'));
+    const entry = payload.modules[0].resources[0];
+    assert.equal(entry.address, 'azurerm_container_app.this["app3"]');
+    assert.equal(entry.instances, 1);
 });
 
-test('buildReducedPayload: change_summary totals reconcile significant + cosmetic', () => {
+test('buildReducedPayload: mixed actions across iterations are all preserved (a lone delete is not lost)', () => {
     const plan = {
         resource_changes: [
-            resource({ address: 'c', change: { actions: ['create'] } }),
+            resource({ address: 'azurerm_static_web_app.sites["a"]', type: 'azurerm_static_web_app', name: 'sites', index: 'a', change: { actions: ['update'], before: { s: 1 }, after: { s: 2 } } }),
+            resource({ address: 'azurerm_static_web_app.sites["b"]', type: 'azurerm_static_web_app', name: 'sites', index: 'b', change: { actions: ['update'], before: { s: 1 }, after: { s: 2 } } }),
+            resource({ address: 'azurerm_static_web_app.sites["gone"]', type: 'azurerm_static_web_app', name: 'sites', index: 'gone', change: { actions: ['delete'] } }),
+        ],
+    };
+    const { payload } = buildReducedPayload(plan, []);
+    const entry = payload.modules[0].resources[0];
+    assert.equal(entry.instances, 3);
+    assert.deepEqual(entry.action_breakdown, { replace: 0, delete: 1, create: 0, update: 2 });
+    assert.deepEqual(entry.destroyed_instances, ['gone']);
+});
+
+test('buildReducedPayload: unions changed/action_reason/replace_triggered_by across iterations', () => {
+    const plan = {
+        resource_changes: [
             resource({
-                address: 'tagonly',
-                change: { actions: ['update'], before: { tags: { A: '1' } }, after: { tags: { A: '2' } } },
+                address: 'aws_instance.web[0]', type: 'aws_instance', name: 'web', index: 0,
+                action_reason: 'replace_because_tainted',
+                change: { actions: ['delete', 'create'], replace_paths: [['ami']] },
             }),
+            resource({
+                address: 'aws_instance.web[1]', type: 'aws_instance', name: 'web', index: 1,
+                action_reason: 'replace_because_cannot_update',
+                change: { actions: ['delete', 'create'], replace_paths: [['instance_type']] },
+            }),
+        ],
+    };
+    const { payload } = buildReducedPayload(plan, []);
+    const entry = payload.modules[0].resources[0];
+    assert.equal(entry.instances, 2);
+    assert.deepEqual(entry.replace_triggered_by.sort(), ['ami', 'instance_type']);
+    assert.deepEqual(entry.action_reason.sort(), ['replace_because_cannot_update', 'replace_because_tainted']);
+    assert.deepEqual(entry.recreated_instances.sort(), ['0', '1']);
+});
+
+test('buildReducedPayload: ranks groups by destructive instance count (replace+delete) desc', () => {
+    const plan = {
+        resource_changes: [
+            // calm module: 10 create, 3 update, 0 destructive
+            ...Array.from({ length: 10 }, (_, i) => resource({ address: `module.calm.aws_x.c${i}`, module_address: 'module.calm', type: 'aws_x', name: `c${i}`, change: { actions: ['create'] } })),
+            ...Array.from({ length: 3 }, (_, i) => resource({ address: `module.calm.aws_y.u${i}`, module_address: 'module.calm', type: 'aws_y', name: `u${i}`, change: { actions: ['update'], before: { a: i }, after: { a: i + 1 } } })),
+            // risky module: 5 replace
+            ...Array.from({ length: 5 }, (_, i) => resource({ address: `module.risky.aws_z.x${i}`, module_address: 'module.risky', type: 'aws_z', name: `x${i}`, change: { actions: ['delete', 'create'] } })),
+        ],
+    };
+    const { payload } = buildReducedPayload(plan, []);
+    assert.equal(payload.modules[0].module, 'module.risky');
+    assert.equal(payload.modules[1].module, 'module.calm');
+});
+
+test('buildReducedPayload: significant_total counts instances, modules_total counts groups', () => {
+    const plan = {
+        resource_changes: [
+            resource({ address: 'aws_instance.web[0]', type: 'aws_instance', name: 'web', index: 0, change: { actions: ['create'] } }),
+            resource({ address: 'aws_instance.web[1]', type: 'aws_instance', name: 'web', index: 1, change: { actions: ['create'] } }),
+            resource({ address: 'aws_s3_bucket.b', type: 'aws_s3_bucket', name: 'b', change: { actions: ['create'] } }),
             resource({ change: { actions: ['no-op'] } }),
         ],
     };
-    const { payload, significantCount, cosmeticCount } = buildReducedPayload(plan, []);
-    assert.equal(significantCount, 1);
-    assert.equal(cosmeticCount, 1);
-    assert.equal(payload.change_summary.significant_total, 1);
-    assert.equal(payload.change_summary.cosmetic_omitted, 1);
-    assert.equal(payload.change_summary.total_changes, 2);
+    const { payload } = buildReducedPayload(plan, []);
+    // 3 instances across 2 groups (the web for_each + the bucket).
+    assert.equal(payload.change_summary.significant_total, 3);
+    assert.equal(payload.change_summary.modules_total, 2);
+    assert.equal(payload.change_summary.total_changes, 3);
 });
 
 test('buildReducedPayload: only cosmetic changes → significantCount 0 (client skips backend)', () => {
@@ -158,23 +249,11 @@ test('buildReducedPayload: only cosmetic changes → significantCount 0 (client 
     assert.equal(significantCount, 0);
 });
 
-test('buildReducedPayload: carries action_reason and replace_triggered_by (names only)', () => {
-    const plan = {
-        resource_changes: [
-            resource({
-                address: 'aws_db_instance.main',
-                action_reason: 'replace_because_cannot_update',
-                change: {
-                    actions: ['delete', 'create'],
-                    replace_paths: [['engine_version'], ['identifier']],
-                },
-            }),
-        ],
-    };
-    const { payload } = buildReducedPayload(plan, []);
-    const entry = payload.resource_changes[0];
-    assert.equal(entry.action_reason, 'replace_because_cannot_update');
-    assert.deepEqual(entry.replace_triggered_by, ['engine_version', 'identifier']);
+test('groupKey / blockAddress: module vs root, ignoring for_each index', () => {
+    assert.equal(blockAddress({ module_address: 'module.cosmos', type: 'azurerm_cosmosdb_account', name: 'this', address: 'module.cosmos.azurerm_cosmosdb_account.this' }), 'module.cosmos.azurerm_cosmosdb_account.this');
+    assert.equal(blockAddress({ type: 'azurerm_static_web_app', name: 'sites', address: 'azurerm_static_web_app.sites["a"]' }), 'azurerm_static_web_app.sites');
+    assert.equal(groupKey({ module_address: 'module.cosmos', type: 't', name: 'n', address: 'module.cosmos.t.n' }), 'module.cosmos');
+    assert.equal(groupKey({ type: 'azurerm_static_web_app', name: 'sites', address: 'azurerm_static_web_app.sites["a"]' }), 'azurerm_static_web_app.sites');
 });
 
 test('changedAttributes: detects diffs and after_unknown (names only, sorted)', () => {
@@ -196,25 +275,54 @@ test('changedTagKeys: detects added/removed/changed keys incl. after_unknown', (
     assert.deepEqual(keys, ['A', 'B', 'C', 'D']);
 });
 
-test('buildCapacityNotice: renders both capacity and cosmetic parts', () => {
-    const notice = buildCapacityNotice({ analyzed: 10, cosmetic_omitted: 3, significant_omitted: 5 });
-    assert.match(notice, /5 additional significant/);
-    assert.match(notice, /10 highest-impact/);
-    assert.match(notice, /3 cosmetic tag-only/);
+test('buildCapacityNotice: renders both group-capacity and cosmetic parts (resource counts)', () => {
+    const notice = buildCapacityNotice({
+        modules_analyzed: 10,
+        modules_omitted: 3,
+        resources_omitted: 24,
+        cosmetic_omitted: 5,
+    });
+    assert.match(notice, /3 additional change group\(s\) \(24 resource\(s\)\)/);
+    assert.match(notice, /10 highest-impact groups/);
+    assert.match(notice, /5 cosmetic tag-only/);
 });
 
 test('buildCapacityNotice: null when nothing omitted', () => {
-    assert.equal(buildCapacityNotice({ analyzed: 4, cosmetic_omitted: 0, significant_omitted: 0 }), null);
+    assert.equal(buildCapacityNotice({ modules_analyzed: 4, modules_omitted: 0, resources_omitted: 0, cosmetic_omitted: 0 }), null);
     assert.equal(buildCapacityNotice(null), null);
 });
 
-test('DLP guard: serialized payload never contains before/after values', () => {
+test('enrichModules: labels multi-instance blocks with a count + breakdown', () => {
+    const analysis = { modules: [{ module: 'root.swa', business_impact: 'x', risk: 'y' }] };
+    const payloadModules = [{
+        module: 'root.swa',
+        is_module: false,
+        action_breakdown: { replace: 0, delete: 1, create: 0, update: 2 },
+        resources: [{ address: 'azurerm_static_web_app.sites', instances: 3, action_breakdown: { replace: 0, delete: 1, create: 0, update: 2 }, destroyed_instances: ['legacy'] }],
+    }];
+    const [mod] = enrichModules(analysis, payloadModules);
+    assert.equal(mod.resources[0].label, 'azurerm_static_web_app.sites ×3 — 1 destroyed, 2 updated (destroyed: legacy)');
+});
+
+test('enrichModules: labels a single-instance block with the action verb', () => {
+    const analysis = { modules: [{ module: 'aws_s3_bucket.logs', business_impact: 'x', risk: 'y' }] };
+    const payloadModules = [{
+        module: 'aws_s3_bucket.logs',
+        is_module: false,
+        action_breakdown: { replace: 0, delete: 0, create: 1, update: 0 },
+        resources: [{ address: 'aws_s3_bucket.logs', instances: 1, action_breakdown: { replace: 0, delete: 0, create: 1, update: 0 } }],
+    }];
+    const [mod] = enrichModules(analysis, payloadModules);
+    assert.equal(mod.resources[0].label, 'aws_s3_bucket.logs (created)');
+});
+
+test('DLP guard: serialized grouped/collapsed payload never contains before/after values', () => {
     const plan = {
         format_version: '1.2',
         terraform_version: '1.9.0',
         resource_changes: [
             resource({
-                address: 'aws_db_instance.main',
+                address: 'module.db.aws_db_instance.main', module_address: 'module.db', type: 'aws_db_instance', name: 'main',
                 change: {
                     actions: ['delete', 'create'],
                     before: { password: 'LEAK_BEFORE_SUPER_SECRET_123' },
@@ -224,7 +332,7 @@ test('DLP guard: serialized payload never contains before/after values', () => {
                 },
             }),
             resource({
-                address: 'aws_s3_bucket.a',
+                address: 'aws_s3_bucket.a', type: 'aws_s3_bucket', name: 'a',
                 change: {
                     actions: ['update'],
                     before: { tags: { Owner: 'LEAK_TAG_VALUE_alice' } },
@@ -234,17 +342,18 @@ test('DLP guard: serialized payload never contains before/after values', () => {
         ],
     };
     const { payload } = buildReducedPayload(plan, ['Owner']);
-    const serialized = JSON.stringify(payload);
-    assert.doesNotMatch(serialized, /LEAK_/);
+    assert.doesNotMatch(JSON.stringify(payload), /LEAK_/);
 });
 
 // Mirrors the exact dummy plan in .github/workflows/e2e.yml so the E2E scenario is
-// validated deterministically (right split + notice inputs + DLP) without running
-// the workflow. Keep in sync if the E2E plan changes.
+// validated deterministically (module grouping + for_each collapse + notice + DLP)
+// without running the workflow. Keep in sync if the E2E plan changes.
 const E2E_PLAN = {
     format_version: '1.2',
     terraform_version: '1.9.0',
     resource_changes: [
+        { address: 'module.cosmos_db.azurerm_cosmosdb_account.this', module_address: 'module.cosmos_db', type: 'azurerm_cosmosdb_account', name: 'this', change: { actions: ['create'] } },
+        { address: 'module.cosmos_db.azurerm_private_endpoint.pe', module_address: 'module.cosmos_db', type: 'azurerm_private_endpoint', name: 'pe', change: { actions: ['create'] } },
         { address: 'aws_s3_bucket.logs', type: 'aws_s3_bucket', name: 'logs', change: { actions: ['create'] } },
         { address: 'aws_iam_role.app', type: 'aws_iam_role', name: 'app', change: { actions: ['update'] } },
         { address: 'aws_instance.legacy', type: 'aws_instance', name: 'legacy', change: { actions: ['delete'] } },
@@ -272,41 +381,43 @@ const E2E_PLAN = {
             address: 'aws_lambda_function.api', type: 'aws_lambda_function', name: 'api',
             change: { actions: ['update'], before: { tags: { Environment: 'LEAK_TAG_dev', Owner: 'LEAK_TAG_alice' } }, after: { tags: { Environment: 'LEAK_TAG_prod', Owner: 'LEAK_TAG_alice' } } },
         },
+        { address: 'azurerm_static_web_app.sites["marketing"]', type: 'azurerm_static_web_app', name: 'sites', index: 'marketing', change: { actions: ['update'] } },
+        { address: 'azurerm_static_web_app.sites["docs"]', type: 'azurerm_static_web_app', name: 'sites', index: 'docs', change: { actions: ['update'] } },
+        { address: 'azurerm_static_web_app.sites["legacy"]', type: 'azurerm_static_web_app', name: 'sites', index: 'legacy', change: { actions: ['delete'] } },
     ],
 };
 
-test('E2E scenario: 5 significant (incl. relevant tag), 2 cosmetic, read/no-op dropped', () => {
-    const { payload, significantCount, cosmeticCount, totalCount } = buildReducedPayload(E2E_PLAN, ['Environment', 'CostCenter']);
-    assert.equal(significantCount, 5);
+test('E2E scenario: 10 significant instances across 7 groups, 2 cosmetic, read/no-op dropped', () => {
+    const { payload, significantCount, cosmeticCount, moduleCount, totalCount } = buildReducedPayload(E2E_PLAN, ['Environment', 'CostCenter']);
+    assert.equal(significantCount, 10);
     assert.equal(cosmeticCount, 2);
-    assert.equal(totalCount, 9);
+    assert.equal(moduleCount, 7);
+    assert.equal(totalCount, 14);
 
-    const addresses = payload.resource_changes.map((r) => r.address);
-    assert.ok(addresses.includes('aws_lambda_function.api'));
-    assert.ok(!addresses.includes('aws_s3_bucket.assets'));
-    assert.ok(!addresses.includes('aws_sns_topic.alerts'));
-    assert.ok(!addresses.includes('data.aws_secretsmanager_secret.existing'));
-    assert.ok(!addresses.includes('aws_vpc.main'));
+    // cosmos_db is a real module with 2 resources.
+    const cosmos = moduleByName(payload, 'module.cosmos_db');
+    assert.equal(cosmos.is_module, true);
+    assert.equal(cosmos.resources.length, 2);
 
-    const lambda = payload.resource_changes.find((r) => r.address === 'aws_lambda_function.api');
-    assert.deepEqual(lambda.changed, ['tags.Environment']);
+    // The 3 static web apps collapse into one block with the lone delete preserved.
+    const swa = moduleByName(payload, 'azurerm_static_web_app.sites');
+    assert.equal(swa.resources[0].instances, 3);
+    assert.deepEqual(swa.resources[0].action_breakdown, { replace: 0, delete: 1, create: 0, update: 2 });
+    assert.deepEqual(swa.resources[0].destroyed_instances, ['legacy']);
+
+    // The relevant tag promoted the lambda to significant.
+    const lambda = moduleByName(payload, 'aws_lambda_function.api');
+    assert.deepEqual(lambda.resources[0].changed, ['tags.Environment']);
 
     assert.deepEqual(payload.change_summary, {
-        total_changes: 7,
+        total_changes: 12,
         cosmetic_omitted: 2,
-        significant_total: 5,
+        significant_total: 10,
+        modules_total: 7,
     });
-
-    // Destructive changes must survive first (delete/replace before create/update).
-    assert.equal(actionRankIndex(addresses, 'aws_instance.legacy') < actionRankIndex(addresses, 'aws_s3_bucket.logs'), true);
 });
 
 test('E2E scenario: DLP holds on the full plan (no LEAK_ values leak)', () => {
     const { payload } = buildReducedPayload(E2E_PLAN, ['Environment', 'CostCenter']);
     assert.doesNotMatch(JSON.stringify(payload), /LEAK_/);
 });
-
-function actionRankIndex(addresses, address) {
-    return addresses.indexOf(address);
-}
-
