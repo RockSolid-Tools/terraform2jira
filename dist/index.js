@@ -598,7 +598,14 @@ async function run() {
     }
 }
 
-module.exports = { run };
+module.exports = {
+    run,
+    // Exported for unit testing (pure, side-effect-free helpers).
+    buildReducedPayload,
+    changedAttributes,
+    changedTagKeys,
+    buildCapacityNotice,
+};
 
 
 /***/ }),

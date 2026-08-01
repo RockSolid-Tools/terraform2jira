@@ -4,7 +4,8 @@
   "description": "GitHub Action that summarizes a Terraform plan and sends it to the Business Translator backend using an OIDC token.",
   "main": "index.js",
   "scripts": {
-    "build": "ncc build index.js -o dist"
+    "build": "ncc build index.js -o dist",
+    "test": "node --test"
   },
   "keywords": [
     "terraform",
