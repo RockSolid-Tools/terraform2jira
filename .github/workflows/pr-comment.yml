@@ -21,6 +21,20 @@ jobs:
             "terraform_version": "1.9.0",
             "resource_changes": [
               {
+                "address": "module.cosmos_db.azurerm_cosmosdb_account.this",
+                "module_address": "module.cosmos_db",
+                "type": "azurerm_cosmosdb_account",
+                "name": "this",
+                "change": { "actions": ["create"] }
+              },
+              {
+                "address": "module.cosmos_db.azurerm_private_endpoint.pe",
+                "module_address": "module.cosmos_db",
+                "type": "azurerm_private_endpoint",
+                "name": "pe",
+                "change": { "actions": ["create"] }
+              },
+              {
                 "address": "aws_s3_bucket.logs",
                 "type": "aws_s3_bucket",
                 "name": "logs",
@@ -30,7 +44,17 @@ jobs:
                 "address": "aws_iam_role.app",
                 "type": "aws_iam_role",
                 "name": "app",
-                "change": { "actions": ["update"] }
+                "change": {
+                  "actions": ["update"],
+                  "before": { "assume_role_policy": "LEAK_policy_old", "max_session_duration": 3600 },
+                  "after": { "assume_role_policy": "LEAK_policy_new", "max_session_duration": 7200 }
+                }
+              },
+              {
+                "address": "aws_instance.legacy",
+                "type": "aws_instance",
+                "name": "legacy",
+                "change": { "actions": ["delete"] }
               },
               {
                 "address": "aws_db_instance.main",
@@ -43,6 +67,77 @@ jobs:
                   "before_sensitive": { "password": true },
                   "after_sensitive": { "password": true }
                 }
+              },
+              {
+                "address": "data.aws_secretsmanager_secret.existing",
+                "type": "aws_secretsmanager_secret",
+                "name": "existing",
+                "change": { "actions": ["read"] }
+              },
+              {
+                "address": "aws_vpc.main",
+                "type": "aws_vpc",
+                "name": "main",
+                "change": { "actions": ["no-op"] }
+              },
+              {
+                "address": "aws_s3_bucket.assets",
+                "type": "aws_s3_bucket",
+                "name": "assets",
+                "change": {
+                  "actions": ["update"],
+                  "before": { "tags": { "Owner": "LEAK_TAG_alice", "Team": "LEAK_TAG_platform" } },
+                  "after": { "tags": { "Owner": "LEAK_TAG_bob", "Team": "LEAK_TAG_platform" } }
+                }
+              },
+              {
+                "address": "aws_sns_topic.alerts",
+                "type": "aws_sns_topic",
+                "name": "alerts",
+                "change": {
+                  "actions": ["update"],
+                  "before": { "tags_all": { "Team": "LEAK_TAG_ops" } },
+                  "after": { "tags_all": { "Team": "LEAK_TAG_sre" } }
+                }
+              },
+              {
+                "address": "aws_lambda_function.api",
+                "type": "aws_lambda_function",
+                "name": "api",
+                "change": {
+                  "actions": ["update"],
+                  "before": { "tags": { "Environment": "LEAK_TAG_dev", "Owner": "LEAK_TAG_alice" } },
+                  "after": { "tags": { "Environment": "LEAK_TAG_prod", "Owner": "LEAK_TAG_alice" } }
+                }
+              },
+              {
+                "address": "azurerm_static_web_app.sites[\"marketing\"]",
+                "type": "azurerm_static_web_app",
+                "name": "sites",
+                "index": "marketing",
+                "change": {
+                  "actions": ["update"],
+                  "before": { "app_settings": { "API_URL": "LEAK_marketing_old" } },
+                  "after": { "app_settings": { "API_URL": "LEAK_marketing_new" } }
+                }
+              },
+              {
+                "address": "azurerm_static_web_app.sites[\"docs\"]",
+                "type": "azurerm_static_web_app",
+                "name": "sites",
+                "index": "docs",
+                "change": {
+                  "actions": ["update"],
+                  "before": { "app_settings": { "API_URL": "LEAK_docs_old" } },
+                  "after": { "app_settings": { "API_URL": "LEAK_docs_new" } }
+                }
+              },
+              {
+                "address": "azurerm_static_web_app.sites[\"legacy\"]",
+                "type": "azurerm_static_web_app",
+                "name": "sites",
+                "index": "legacy",
+                "change": { "actions": ["delete"] }
               }
             ]
           }

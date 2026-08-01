@@ -41,6 +41,10 @@ function buildMarkdown(analysis, context) {
         analysis.recommendations.forEach((r) => lines.push(`- ${r}`));
     }
 
+    if (context && context.jiraLink) {
+        lines.push('', `🔗 [View ticket in Jira](${context.jiraLink})`);
+    }
+
     // Full per-resource detail, collapsed behind a native <details> toggle.
     if (Array.isArray(analysis.modules) && analysis.modules.length) {
         lines.push('', '<details>', '<summary>Details — resource changes</summary>', '');
@@ -52,10 +56,6 @@ function buildMarkdown(analysis, context) {
             if (mod.risk) lines.push(`_Risk: ${mod.risk}_`);
         });
         lines.push('', '</details>');
-    }
-
-    if (context && context.jiraLink) {
-        lines.push('', `🔗 [View ticket in Jira](${context.jiraLink})`);
     }
 
     return lines.join('\n');
@@ -945,6 +945,19 @@ function buildBlocks(analysis, context) {
         blocks.push(section(`*Recommendations*\n${analysis.recommendations.map((r) => `• ${r}`).join('\n')}`));
     }
 
+    // URL button linking to the Jira ticket (works with Incoming Webhooks)
+    if (context.jiraLink) {
+        blocks.push({
+            type: 'actions',
+            elements: [{
+                type: 'button',
+                text: { type: 'plain_text', text: 'Ver ticket en Jira', emoji: true },
+                url: context.jiraLink,
+                style: 'primary',
+            }],
+        });
+    }
+
     // Full per-resource detail (Slack Incoming Webhooks can't collapse; a divider +
     // header marks the section, and Slack auto-truncates long messages with "Show more").
     if (Array.isArray(analysis.modules) && analysis.modules.length) {
@@ -960,19 +973,6 @@ function buildBlocks(analysis, context) {
             if (resList) lines.push(resList);
             if (mod.risk) lines.push(`*Risk:* ${mod.risk}`);
             blocks.push(section(lines.join('\n')));
-        });
-    }
-
-    // URL button linking to the Jira ticket (works with Incoming Webhooks)
-    if (context.jiraLink) {
-        blocks.push({
-            type: 'actions',
-            elements: [{
-                type: 'button',
-                text: { type: 'plain_text', text: 'Ver ticket en Jira', emoji: true },
-                url: context.jiraLink,
-                style: 'primary',
-            }],
         });
     }
 
