@@ -11,7 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Crear tfplan.json dummy
+      # Realistic, interrelated plan: a production data-tier upgrade (HA change recreates the
+      # DB + its private endpoint in cascade), compute scale-up (cost), legacy decommission,
+      # Key Vault lockdown (security), and adoption of existing infra (governance). LEAK_*
+      # values across before/after exercise the DLP regression (names leave, values never do).
+      - name: Crear tfplan.json realista
         run: |
           cat > tfplan.json <<'EOF'
           {
@@ -19,131 +23,219 @@ jobs:
             "terraform_version": "1.9.0",
             "resource_changes": [
               {
-                "address": "module.cosmos_db.azurerm_cosmosdb_account.this",
-                "module_address": "module.cosmos_db",
-                "type": "azurerm_cosmosdb_account",
-                "name": "this",
-                "change": { "actions": ["create"] }
+                "address": "module.database.azurerm_postgresql_flexible_server.main",
+                "module_address": "module.database",
+                "type": "azurerm_postgresql_flexible_server",
+                "name": "main",
+                "action_reason": "replace_because_cannot_update",
+                "change": {
+                  "actions": ["delete", "create"],
+                  "before": { "administrator_password": "LEAK_DB_OLD_P@ss123", "sku_name": "GP_Standard_D2s_v3", "high_availability": [{ "mode": "Disabled" }], "zone": "1" },
+                  "after": { "administrator_password": "LEAK_DB_NEW_P@ss456", "sku_name": "GP_Standard_D4s_v3", "high_availability": [{ "mode": "ZoneRedundant" }], "zone": "2" },
+                  "before_sensitive": { "administrator_password": true },
+                  "after_sensitive": { "administrator_password": true },
+                  "replace_paths": [["zone"]]
+                }
               },
               {
-                "address": "module.cosmos_db.azurerm_private_endpoint.pe",
-                "module_address": "module.cosmos_db",
+                "address": "module.database.azurerm_private_endpoint.db",
+                "module_address": "module.database",
                 "type": "azurerm_private_endpoint",
-                "name": "pe",
-                "change": { "actions": ["create"] }
+                "name": "db",
+                "action_reason": "replace_because_cannot_update",
+                "change": {
+                  "actions": ["delete", "create"],
+                  "before": { "subnet_id": "/subscriptions/LEAK_SUB/subnets/legacy" },
+                  "after": { "subnet_id": "/subscriptions/LEAK_SUB/subnets/data" },
+                  "replace_paths": [["subnet_id"]]
+                }
               },
               {
-                "address": "aws_s3_bucket.logs",
-                "type": "aws_s3_bucket",
-                "name": "logs",
-                "change": { "actions": ["create"] }
+                "address": "module.database.azurerm_private_dns_a_record.db",
+                "module_address": "module.database",
+                "type": "azurerm_private_dns_a_record",
+                "name": "db",
+                "change": {
+                  "actions": ["update"],
+                  "before": { "records": ["10.0.1.4"] },
+                  "after": { "records": ["10.0.2.4"] }
+                }
               },
               {
-                "address": "aws_iam_role.app",
-                "type": "aws_iam_role",
+                "address": "module.network.azurerm_subnet.data",
+                "module_address": "module.network",
+                "type": "azurerm_subnet",
+                "name": "data",
+                "change": {
+                  "actions": ["update"],
+                  "before": { "delegation": [] },
+                  "after": { "delegation": [{ "name": "flexibleServers" }] }
+                }
+              },
+              {
+                "address": "module.network.azurerm_network_security_group.app",
+                "module_address": "module.network",
+                "type": "azurerm_network_security_group",
                 "name": "app",
                 "change": {
                   "actions": ["update"],
-                  "before": { "assume_role_policy": "LEAK_policy_old", "max_session_duration": 3600 },
-                  "after": { "assume_role_policy": "LEAK_policy_new", "max_session_duration": 7200 }
+                  "before": { "security_rule": [{ "name": "https", "destination_port_range": "443", "source_address_prefix": "Internet" }] },
+                  "after": { "security_rule": [{ "name": "https", "destination_port_range": "443", "source_address_prefix": "Internet" }, { "name": "ssh-admin", "destination_port_range": "22", "source_address_prefix": "LEAK_ADMIN_IP_203_0_113_7" }] }
                 }
               },
               {
-                "address": "aws_instance.legacy",
-                "type": "aws_instance",
-                "name": "legacy",
-                "change": { "actions": ["delete"] }
-              },
-              {
-                "address": "aws_db_instance.main",
-                "type": "aws_db_instance",
+                "address": "module.app_service.azurerm_service_plan.main",
+                "module_address": "module.app_service",
+                "type": "azurerm_service_plan",
                 "name": "main",
                 "change": {
-                  "actions": ["delete", "create"],
-                  "before": { "password": "LEAK_BEFORE_SUPER_SECRET_123" },
-                  "after": { "password": "LEAK_AFTER_SUPER_SECRET_456" },
-                  "before_sensitive": { "password": true },
-                  "after_sensitive": { "password": true }
+                  "actions": ["update"],
+                  "before": { "sku_name": "P1v3" },
+                  "after": { "sku_name": "P2v3" }
                 }
               },
               {
-                "address": "data.aws_secretsmanager_secret.existing",
-                "type": "aws_secretsmanager_secret",
-                "name": "existing",
+                "address": "module.app_service.azurerm_linux_web_app.main",
+                "module_address": "module.app_service",
+                "type": "azurerm_linux_web_app",
+                "name": "main",
+                "change": {
+                  "actions": ["update"],
+                  "before": { "app_settings": { "DB_CONNECTION_STRING": "LEAK_conn_old" }, "site_config": [{ "always_on": true }] },
+                  "after": { "app_settings": { "DB_CONNECTION_STRING": "LEAK_conn_new" }, "site_config": [{ "always_on": true, "health_check_path": "/health" }] },
+                  "before_sensitive": { "app_settings": true },
+                  "after_sensitive": { "app_settings": true }
+                }
+              },
+              {
+                "address": "module.functions.azurerm_linux_function_app.fn[\"orders\"]",
+                "module_address": "module.functions",
+                "type": "azurerm_linux_function_app",
+                "name": "fn",
+                "index": "orders",
+                "change": {
+                  "actions": ["update"],
+                  "before": { "app_settings": { "QUEUE_CONNECTION": "LEAK_orders_old" } },
+                  "after": { "app_settings": { "QUEUE_CONNECTION": "LEAK_orders_new" } },
+                  "before_sensitive": { "app_settings": true },
+                  "after_sensitive": { "app_settings": true }
+                }
+              },
+              {
+                "address": "module.functions.azurerm_linux_function_app.fn[\"payments\"]",
+                "module_address": "module.functions",
+                "type": "azurerm_linux_function_app",
+                "name": "fn",
+                "index": "payments",
+                "change": {
+                  "actions": ["update"],
+                  "before": { "app_settings": { "STRIPE_KEY": "LEAK_payments_old" } },
+                  "after": { "app_settings": { "STRIPE_KEY": "LEAK_payments_new" } },
+                  "before_sensitive": { "app_settings": true },
+                  "after_sensitive": { "app_settings": true }
+                }
+              },
+              {
+                "address": "module.functions.azurerm_linux_function_app.fn[\"notifications\"]",
+                "module_address": "module.functions",
+                "type": "azurerm_linux_function_app",
+                "name": "fn",
+                "index": "notifications",
+                "change": {
+                  "actions": ["update"],
+                  "before": { "app_settings": { "SENDGRID_KEY": "LEAK_notif_old" } },
+                  "after": { "app_settings": { "SENDGRID_KEY": "LEAK_notif_new" } },
+                  "before_sensitive": { "app_settings": true },
+                  "after_sensitive": { "app_settings": true }
+                }
+              },
+              {
+                "address": "module.functions.azurerm_linux_function_app.fn[\"legacy_sync\"]",
+                "module_address": "module.functions",
+                "type": "azurerm_linux_function_app",
+                "name": "fn",
+                "index": "legacy_sync",
+                "action_reason": "delete_because_no_resource_config",
+                "change": {
+                  "actions": ["delete"],
+                  "before": { "app_settings": { "LEGACY_API_KEY": "LEAK_legacy_sync" } },
+                  "before_sensitive": { "app_settings": true }
+                }
+              },
+              {
+                "address": "module.keyvault.azurerm_key_vault.main",
+                "module_address": "module.keyvault",
+                "type": "azurerm_key_vault",
+                "name": "main",
+                "change": {
+                  "actions": ["update"],
+                  "before": { "public_network_access_enabled": true, "network_acls": [{ "default_action": "Allow" }] },
+                  "after": { "public_network_access_enabled": false, "network_acls": [{ "default_action": "Deny" }] }
+                }
+              },
+              {
+                "address": "module.keyvault.azurerm_role_assignment.app_secrets",
+                "module_address": "module.keyvault",
+                "type": "azurerm_role_assignment",
+                "name": "app_secrets",
+                "change": { "actions": ["create"] }
+              },
+              {
+                "address": "azurerm_storage_account.backups",
+                "type": "azurerm_storage_account",
+                "name": "backups",
+                "change": { "actions": ["create"] }
+              },
+              {
+                "address": "azurerm_linux_virtual_machine.legacy_jumpbox",
+                "type": "azurerm_linux_virtual_machine",
+                "name": "legacy_jumpbox",
+                "action_reason": "delete_because_no_resource_config",
+                "change": {
+                  "actions": ["delete"],
+                  "before": { "admin_password": "LEAK_JUMPBOX_PW", "size": "Standard_B2s" },
+                  "before_sensitive": { "admin_password": true }
+                }
+              },
+              {
+                "address": "azurerm_container_registry.shared",
+                "type": "azurerm_container_registry",
+                "name": "shared",
+                "change": {
+                  "actions": ["no-op"],
+                  "importing": { "id": "LEAK_IMPORT_ACR_ID" }
+                }
+              },
+              {
+                "address": "data.azurerm_client_config.current",
+                "type": "azurerm_client_config",
+                "name": "current",
                 "change": { "actions": ["read"] }
               },
               {
-                "address": "aws_vpc.main",
-                "type": "aws_vpc",
+                "address": "azurerm_resource_group.main",
+                "type": "azurerm_resource_group",
                 "name": "main",
                 "change": { "actions": ["no-op"] }
               },
               {
-                "address": "aws_s3_bucket.assets",
-                "type": "aws_s3_bucket",
-                "name": "assets",
+                "address": "azurerm_log_analytics_workspace.monitoring",
+                "type": "azurerm_log_analytics_workspace",
+                "name": "monitoring",
                 "change": {
                   "actions": ["update"],
-                  "before": { "tags": { "Owner": "LEAK_TAG_alice", "Team": "LEAK_TAG_platform" } },
-                  "after": { "tags": { "Owner": "LEAK_TAG_bob", "Team": "LEAK_TAG_platform" } }
+                  "before": { "tags": { "Owner": "LEAK_TAG_alice" } },
+                  "after": { "tags": { "Owner": "LEAK_TAG_bob" } }
                 }
               },
               {
-                "address": "aws_sns_topic.alerts",
-                "type": "aws_sns_topic",
-                "name": "alerts",
+                "address": "azurerm_application_insights.app",
+                "type": "azurerm_application_insights",
+                "name": "app",
                 "change": {
                   "actions": ["update"],
-                  "before": { "tags_all": { "Team": "LEAK_TAG_ops" } },
-                  "after": { "tags_all": { "Team": "LEAK_TAG_sre" } }
-                }
-              },
-              {
-                "address": "aws_lambda_function.api",
-                "type": "aws_lambda_function",
-                "name": "api",
-                "change": {
-                  "actions": ["update"],
-                  "before": { "tags": { "Environment": "LEAK_TAG_dev", "Owner": "LEAK_TAG_alice" } },
-                  "after": { "tags": { "Environment": "LEAK_TAG_prod", "Owner": "LEAK_TAG_alice" } }
-                }
-              },
-              {
-                "address": "azurerm_static_web_app.sites[\"marketing\"]",
-                "type": "azurerm_static_web_app",
-                "name": "sites",
-                "index": "marketing",
-                "change": {
-                  "actions": ["update"],
-                  "before": { "app_settings": { "API_URL": "LEAK_marketing_old" } },
-                  "after": { "app_settings": { "API_URL": "LEAK_marketing_new" } }
-                }
-              },
-              {
-                "address": "azurerm_static_web_app.sites[\"docs\"]",
-                "type": "azurerm_static_web_app",
-                "name": "sites",
-                "index": "docs",
-                "change": {
-                  "actions": ["update"],
-                  "before": { "app_settings": { "API_URL": "LEAK_docs_old" } },
-                  "after": { "app_settings": { "API_URL": "LEAK_docs_new" } }
-                }
-              },
-              {
-                "address": "azurerm_static_web_app.sites[\"legacy\"]",
-                "type": "azurerm_static_web_app",
-                "name": "sites",
-                "index": "legacy",
-                "change": { "actions": ["delete"] }
-              },
-              {
-                "address": "aws_ecr_repository.adopted",
-                "type": "aws_ecr_repository",
-                "name": "adopted",
-                "change": {
-                  "actions": ["no-op"],
-                  "importing": { "id": "LEAK_IMPORT_ID_arn_ecr_adopted" }
+                  "before": { "tags": { "CostCenter": "LEAK_CC_1000", "Owner": "LEAK_TAG_alice" } },
+                  "after": { "tags": { "CostCenter": "LEAK_CC_2000", "Owner": "LEAK_TAG_alice" } }
                 }
               }
             ]
@@ -161,10 +253,8 @@ jobs:
           jira_email: ${{ secrets.JIRA_EMAIL }}
           jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
           jira_issue_key: CORE-1
-          # api_url: https://terraform2jira-backend-git-feature-auth-analyze-rock-solid1.vercel.app/api/analyze
 
       - name: Ver plan reducido (debug)
         env:
           REDUCED_PLAN: ${{ steps.translate.outputs.reduced_plan }}
         run: echo "$REDUCED_PLAN" | jq .
-
