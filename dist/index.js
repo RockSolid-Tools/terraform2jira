@@ -29,8 +29,8 @@ function buildMarkdown(analysis, context) {
         lines.push('', `**Overview:** ${analysis.overview}`);
     }
 
-    if (context && context.capacityNotice) {
-        lines.push('', `> ℹ️ ${context.capacityNotice}`);
+    if (context && Array.isArray(context.capacityNotice)) {
+        context.capacityNotice.forEach((notice) => lines.push('', `> ${notice.icon} ${notice.text}`));
     }
 
     if (Array.isArray(analysis.recommendations) && analysis.recommendations.length) {
@@ -162,8 +162,10 @@ function buildAdf(analysis, capacityNotice) {
         content.push(bulletList(analysis.risks.map((risk) => textNode(risk))));
     }
 
-    if (capacityNotice) {
-        content.push(paragraph({ type: 'text', text: `ℹ️ ${capacityNotice}`, marks: [{ type: 'em' }] }));
+    if (Array.isArray(capacityNotice)) {
+        for (const notice of capacityNotice) {
+            content.push(paragraph({ type: 'text', text: `${notice.icon} ${notice.text}`, marks: [{ type: 'em' }] }));
+        }
     }
 
     if (analysis.overview) {
@@ -388,7 +390,10 @@ function buildReducedPayload(plan, relevantTags) {
             }
             significant.push({ resource, actions, changed, importing });
         } else {
-            significant.push({ resource, actions, changed: null, importing });
+            // Replaces carry their changed attribute NAMES too (DLP-safe) so the LLM can
+            // explain what forced the recreation; create/delete/import have no meaningful diff.
+            const isReplace = actions.includes('delete') && actions.includes('create');
+            significant.push({ resource, actions, changed: isReplace ? changedAttributes(change) : null, importing });
         }
     }
 
@@ -758,15 +763,24 @@ function buildCapacityNotice(changeSummary) {
     if (!changeSummary) {
         return null;
     }
-    const parts = [];
+    const count = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    const notices = [];
     if (changeSummary.modules_omitted > 0) {
         const resources = changeSummary.resources_omitted || 0;
-        parts.push(`${changeSummary.modules_omitted} additional change group(s) (${resources} resource(s)) were not analyzed in detail due to capacity limits (the ${changeSummary.modules_analyzed} highest-impact groups were prioritized)`);
+        const was = changeSummary.modules_omitted === 1 ? 'was' : 'were';
+        notices.push({
+            icon: 'ℹ️',
+            text: `${count(changeSummary.modules_omitted, 'lower-impact change group')} (${count(resources, 'resource')}) ${was} not detailed — the ${changeSummary.modules_analyzed} highest-impact groups were prioritized.`,
+        });
     }
     if (changeSummary.cosmetic_omitted > 0) {
-        parts.push(`${changeSummary.cosmetic_omitted} cosmetic tag-only change(s) were skipped as low-impact`);
+        const was = changeSummary.cosmetic_omitted === 1 ? 'was' : 'were';
+        notices.push({
+            icon: '🏷️',
+            text: `${count(changeSummary.cosmetic_omitted, 'cosmetic tag-only change')} ${was} skipped as low-impact.`,
+        });
     }
-    return parts.length ? `${parts.join('; ')}.` : null;
+    return notices.length ? notices : null;
 }
 
 async function distribute(analysis, httpClient, event, changeSummary, payloadModules) {
@@ -916,8 +930,10 @@ function buildBlocks(analysis, context) {
         blocks.push(section(`*Risks*\n${analysis.risks.map((r) => `• ${r}`).join('\n')}`));
     }
 
-    if (context.capacityNotice) {
-        blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `ℹ️ ${context.capacityNotice}` }] });
+    if (Array.isArray(context.capacityNotice)) {
+        for (const notice of context.capacityNotice) {
+            blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `${notice.icon} ${notice.text}` }] });
+        }
     }
 
     if (analysis.overview) {

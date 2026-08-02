@@ -303,16 +303,37 @@ test('changedTagKeys: detects added/removed/changed keys incl. after_unknown', (
     assert.deepEqual(keys, ['A', 'B', 'C', 'D']);
 });
 
-test('buildCapacityNotice: renders both group-capacity and cosmetic parts (resource counts)', () => {
-    const notice = buildCapacityNotice({
+test('buildCapacityNotice: returns separate parts with distinct icons for capacity vs tags', () => {
+    const notices = buildCapacityNotice({
         modules_analyzed: 10,
         modules_omitted: 3,
         resources_omitted: 24,
         cosmetic_omitted: 5,
     });
-    assert.match(notice, /3 additional change group\(s\) \(24 resource\(s\)\)/);
-    assert.match(notice, /10 highest-impact groups/);
-    assert.match(notice, /5 cosmetic tag-only/);
+    assert.equal(notices.length, 2);
+    const [capacity, tags] = notices;
+    assert.match(capacity.text, /3 lower-impact change groups \(24 resources\)/);
+    assert.match(capacity.text, /10 highest-impact groups/);
+    assert.match(tags.text, /5 cosmetic tag-only changes/);
+    assert.notEqual(capacity.icon, tags.icon);
+});
+
+test('buildCapacityNotice: singular wording has no "(s)" clutter', () => {
+    const notices = buildCapacityNotice({
+        modules_analyzed: 8,
+        modules_omitted: 1,
+        resources_omitted: 1,
+        cosmetic_omitted: 1,
+    });
+    assert.match(notices[0].text, /1 lower-impact change group \(1 resource\) was not detailed/);
+    assert.match(notices[1].text, /1 cosmetic tag-only change was skipped as low-impact/);
+    assert.equal(notices.some((n) => n.text.includes('(s)')), false);
+});
+
+test('buildCapacityNotice: only cosmetic omitted → a single tag part', () => {
+    const notices = buildCapacityNotice({ modules_analyzed: 5, modules_omitted: 0, resources_omitted: 0, cosmetic_omitted: 2 });
+    assert.equal(notices.length, 1);
+    assert.match(notices[0].text, /2 cosmetic tag-only changes were skipped/);
 });
 
 test('buildCapacityNotice: null when nothing omitted', () => {
@@ -545,6 +566,30 @@ test('buildReducedPayload: replace detected regardless of action order (create_b
     const { payload, significantCount } = buildReducedPayload(plan, []);
     assert.equal(significantCount, 1);
     assert.deepEqual(payload.modules[0].resources[0].action_breakdown, { replace: 1, delete: 0, create: 0, import: 0, update: 0 });
+});
+
+test('buildReducedPayload: a replace forwards its changed attribute NAMES (DLP-safe), create/delete do not', () => {
+    const plan = {
+        resource_changes: [
+            {
+                address: 'aws_db_instance.main', type: 'aws_db_instance', name: 'main',
+                change: {
+                    actions: ['delete', 'create'],
+                    before: { engine_version: '13', instance_class: 'db.t3.medium', password: 'SECRET_OLD' },
+                    after: { engine_version: '15', instance_class: 'db.t3.large', password: 'SECRET_NEW' },
+                    before_sensitive: { password: true }, after_sensitive: { password: true },
+                },
+            },
+            { address: 'aws_s3_bucket.new', type: 'aws_s3_bucket', name: 'new', change: { actions: ['create'] } },
+            { address: 'aws_instance.old', type: 'aws_instance', name: 'old', change: { actions: ['delete'] } },
+        ]
+    };
+    const { payload } = buildReducedPayload(plan, []);
+    const replaced = moduleByName(payload, 'aws_db_instance.main').resources[0];
+    assert.deepEqual(replaced.changed, ['engine_version', 'instance_class', 'password']);
+    assert.equal(JSON.stringify(payload).includes('SECRET_'), false);
+    assert.equal(moduleByName(payload, 'aws_s3_bucket.new').resources[0].changed, undefined);
+    assert.equal(moduleByName(payload, 'aws_instance.old').resources[0].changed, undefined);
 });
 
 test('buildReducedPayload: action_reason is captured and forwarded', () => {
