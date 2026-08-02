@@ -528,22 +528,30 @@ function friendlyBackendError(status, result) {
 // Safe to retry: backend is idempotent per commit and refunds quota on failure.
 async function postWithRetry(httpClient, url, payload, headers, maxRetries = 2) {
     for (let attempt = 0; ; attempt += 1) {
-        let response;
+        let status;
+        let result;
         try {
-            response = await httpClient.postJson(url, payload, headers);
-        } catch (error) {
-            if (attempt < maxRetries) {
-                const waitMs = 2000 * (attempt + 1);
-                core.warning(`Backend request failed (${error.message}); retrying in ${waitMs}ms (retry ${attempt + 1}/${maxRetries}).`);
-                await sleep(waitMs);
-                continue;
+            const response = await httpClient.postJson(url, payload, headers);
+            status = response.statusCode;
+            result = response.result;
+            if (status >= 200 && status < 300) {
+                return response;
             }
-            core.debug(`Backend request error: ${error.message}`);
-            throw new Error('Could not reach the analysis service. Please try again later.');
-        }
-        const status = response.statusCode;
-        if (status >= 200 && status < 300) {
-            return response;
+        } catch (error) {
+            // postJson rejects with HttpClientError (carrying statusCode/result) on any
+            // status > 299; a genuine network failure has no numeric statusCode.
+            status = typeof error.statusCode === 'number' ? error.statusCode : 0;
+            result = error.result;
+            if (!status) {
+                if (attempt < maxRetries) {
+                    const waitMs = 2000 * (attempt + 1);
+                    core.warning(`Backend request failed (${error.message}); retrying in ${waitMs}ms (retry ${attempt + 1}/${maxRetries}).`);
+                    await sleep(waitMs);
+                    continue;
+                }
+                core.debug(`Backend request error: ${error.message}`);
+                throw new Error('Could not reach the analysis service. Please try again later.');
+            }
         }
         if (RETRYABLE_STATUS.has(status) && attempt < maxRetries) {
             const waitMs = 2000 * (attempt + 1);
@@ -551,8 +559,8 @@ async function postWithRetry(httpClient, url, payload, headers, maxRetries = 2) 
             await sleep(waitMs);
             continue;
         }
-        core.debug(`Backend error ${status}: ${JSON.stringify(response.result)}`);
-        throw new Error(friendlyBackendError(status, response.result));
+        core.debug(`Backend error ${status}: ${JSON.stringify(result)}`);
+        throw new Error(friendlyBackendError(status, result));
     }
 }
 

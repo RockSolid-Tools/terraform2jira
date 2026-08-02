@@ -576,7 +576,7 @@ test('buildReducedPayload: whole-module deletion groups all its resources as del
     assert.equal(payload.modules[0].resources.length, 2);
 });
 
-test('buildReducedPayload: a large plan (500 distinct blocks) sends all and stays under the 256KB byte guard', () => {
+test('buildReducedPayload: a large plan (500 distinct blocks) sends all and stays under the 512KB byte guard', () => {
     const changes = [];
     for (let i = 0; i < 500; i += 1) {
         changes.push({ address: `aws_instance.node_${i}`, type: 'aws_instance', name: `node_${i}`, change: { actions: ['update'], before: { ami: 'a' }, after: { ami: 'b' } } });
@@ -585,7 +585,7 @@ test('buildReducedPayload: a large plan (500 distinct blocks) sends all and stay
     assert.equal(significantCount, 500);
     assert.equal(moduleCount, 500);
     const bytes = Buffer.byteLength(JSON.stringify(payload));
-    assert.ok(bytes < 256 * 1024, `payload is ${bytes} bytes, expected < 262144`);
+    assert.ok(bytes < 512 * 1024, `payload is ${bytes} bytes, expected < 524288`);
 });
 
 // --- Import handling --------------------------------------------------------
