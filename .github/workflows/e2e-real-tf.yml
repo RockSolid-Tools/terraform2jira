@@ -1,0 +1,170 @@
+name: E2E Real Terraform Plan
+
+# Full pipeline test fed by a plan produced by REAL terraform (terraform_data + random,
+# no cloud, no credentials) instead of a hand-written JSON. Validates our parser against
+# the actual `terraform show -json` schema, plus nested modules / for_each / replace cascade.
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: 'Change scenario to plan'
+        type: choice
+        default: combined
+        options:
+          - combined        # update + delete + replace cascade
+          - replace-cascade
+          - update-delete
+          - baseline        # all create
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Generar harness Terraform (sin nube)
+        run: |
+          mkdir -p harness/modules/app harness/modules/workload
+
+          cat > harness/versions.tf <<'EOF'
+          terraform {
+            required_version = ">= 1.5"
+            required_providers {
+              random = {
+                source  = "hashicorp/random"
+                version = "~> 3.6"
+              }
+            }
+          }
+          EOF
+
+          cat > harness/variables.tf <<'EOF'
+          variable "service_count" {
+            type    = number
+            default = 30
+          }
+          variable "app_version" {
+            type    = string
+            default = "1.0.0"
+          }
+          variable "premium_services" {
+            type    = set(string)
+            default = []
+          }
+          EOF
+
+          cat > harness/main.tf <<'EOF'
+          locals {
+            services = {
+              for i in range(var.service_count) :
+              format("svc-%02d", i) => {
+                tier = contains(var.premium_services, format("svc-%02d", i)) ? "premium" : "standard"
+              }
+            }
+          }
+
+          module "app" {
+            source   = "./modules/app"
+            for_each = local.services
+
+            name    = each.key
+            tier    = each.value.tier
+            release = var.app_version
+          }
+          EOF
+
+          cat > harness/modules/app/variables.tf <<'EOF'
+          variable "name" { type = string }
+          variable "tier" { type = string }
+          variable "release" { type = string }
+          variable "shards" {
+            type    = list(string)
+            default = ["a", "b", "c"]
+          }
+          EOF
+
+          cat > harness/modules/app/main.tf <<'EOF'
+          resource "random_pet" "id" {
+            length  = 2
+            keepers = { tier = var.tier }
+          }
+
+          resource "terraform_data" "config" {
+            input = {
+              name    = var.name
+              tier    = var.tier
+              release = var.release
+            }
+          }
+
+          module "workload" {
+            source = "../workload"
+            name   = var.name
+            seed   = random_pet.id.id
+            shards = var.shards
+          }
+          EOF
+
+          cat > harness/modules/workload/variables.tf <<'EOF'
+          variable "name" { type = string }
+          variable "seed" { type = string }
+          variable "shards" { type = list(string) }
+          EOF
+
+          cat > harness/modules/workload/main.tf <<'EOF'
+          resource "random_id" "shard" {
+            for_each    = toset(var.shards)
+            byte_length = 4
+            keepers     = { seed = var.seed }
+          }
+
+          resource "terraform_data" "unit" {
+            input = var.name
+            lifecycle {
+              replace_triggered_by = [random_id.shard]
+            }
+          }
+          EOF
+
+      - name: Apply baseline (state local, sin nube)
+        run: |
+          terraform -chdir=harness init -input=false
+          terraform -chdir=harness apply -auto-approve -input=false
+
+      - name: Plan del escenario -> tfplan.json
+        run: |
+          set -f  # disable globbing so the [...] in the list var is passed literally
+          case "${{ inputs.scenario }}" in
+            combined)        VARS='-var=app_version=1.1.0 -var=service_count=28 -var=premium_services=["svc-05"]' ;;
+            replace-cascade) VARS='-var=premium_services=["svc-05"]' ;;
+            update-delete)   VARS='-var=app_version=1.1.0 -var=service_count=28' ;;
+            baseline)        VARS='' ;;
+          esac
+          terraform -chdir=harness plan -out=plan.tmp -input=false $VARS
+          terraform -chdir=harness show -json plan.tmp > tfplan.json
+          echo "resource_changes: $(jq '.resource_changes | length' tfplan.json)"
+
+      - name: Ejecutar la Action (referencia local)
+        id: translate
+        uses: ./
+        with:
+          plan_path: tfplan.json
+          relevant_tags: Environment,CostCenter
+          slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          jira_base_url: https://terraform2jira.atlassian.net
+          jira_email: ${{ secrets.JIRA_EMAIL }}
+          jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
+          jira_issue_key: CORE-1
+
+      - name: Ver plan reducido (debug)
+        env:
+          REDUCED_PLAN: ${{ steps.translate.outputs.reduced_plan }}
+        run: echo "$REDUCED_PLAN" | jq .

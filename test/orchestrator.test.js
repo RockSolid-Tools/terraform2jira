@@ -10,6 +10,8 @@ const {
     blockAddress,
     enrichModules,
     overviewLine,
+    postWithRetry,
+    friendlyBackendError,
 } = require('../lib/orchestrator');
 
 // Helper to build a resource_change entry quickly.
@@ -630,3 +632,61 @@ test('enrichModules: a single import block → (imported) meta', () => {
     const [mod] = enrichModules(analysis, payloadModules);
     assert.equal(mod.meta, '(imported)');
 });
+
+// --- Backend error handling / retry ----------------------------------------
+
+function httpError(statusCode, result) {
+    // Mirrors @actions/http-client HttpClientError: thrown on any non-2xx, carries statusCode.
+    const err = new Error(`request failed (${statusCode})`);
+    err.statusCode = statusCode;
+    err.result = result;
+    return err;
+}
+
+test('friendlyBackendError: maps each status to a concise user-facing message', () => {
+    assert.match(friendlyBackendError(401), /authentication failed/i);
+    assert.match(friendlyBackendError(402), /quota/i);
+    assert.match(friendlyBackendError(403), /not allowed/i);
+    assert.match(friendlyBackendError(413), /too large/i);
+    assert.match(friendlyBackendError(429), /temporarily unavailable/i);
+    assert.match(friendlyBackendError(500), /temporarily unavailable/i);
+    assert.match(friendlyBackendError(502), /temporarily unavailable/i);
+    assert.match(friendlyBackendError(504), /temporarily unavailable/i);
+    assert.match(friendlyBackendError(418), /unexpected error \(status 418\)/i);
+});
+
+test('postWithRetry: returns the response on a 2xx without retrying', async () => {
+    let calls = 0;
+    const httpClient = { postJson: async () => { calls += 1; return { statusCode: 200, result: { ok: true } }; } };
+    const res = await postWithRetry(httpClient, 'u', {}, {});
+    assert.equal(calls, 1);
+    assert.deepEqual(res.result, { ok: true });
+});
+
+test('postWithRetry: a non-retryable status (402) is NOT retried and throws its friendly message', async () => {
+    let calls = 0;
+    const httpClient = { postJson: async () => { calls += 1; throw httpError(402, { message: 'quota_exceeded' }); } };
+    await assert.rejects(
+        postWithRetry(httpClient, 'u', {}, {}),
+        (e) => e.message === friendlyBackendError(402)
+    );
+    assert.equal(calls, 1, 'a 402 must not be retried');
+});
+
+test('postWithRetry: a retryable HttpClientError (502) yields the 5xx friendly message, not the generic network one', async () => {
+    const httpClient = { postJson: async () => { throw httpError(502, { message: 'openai' }); } };
+    // maxRetries=0 exercises the status classification without waiting through backoff.
+    await assert.rejects(
+        postWithRetry(httpClient, 'u', {}, {}, 0),
+        (e) => e.message === friendlyBackendError(502) && /temporarily unavailable/i.test(e.message)
+    );
+});
+
+test('postWithRetry: a genuine network error (no statusCode) throws the generic unreachable message', async () => {
+    const httpClient = { postJson: async () => { throw new Error('ECONNRESET'); } };
+    await assert.rejects(
+        postWithRetry(httpClient, 'u', {}, {}, 0),
+        (e) => /could not reach the analysis service/i.test(e.message)
+    );
+});
+

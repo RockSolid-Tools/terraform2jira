@@ -869,6 +869,8 @@ module.exports = {
     blockAddress,
     enrichModules,
     overviewLine,
+    postWithRetry,
+    friendlyBackendError,
 };
 
 
