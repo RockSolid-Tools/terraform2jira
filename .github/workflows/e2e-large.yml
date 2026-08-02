@@ -1,0 +1,64 @@
+name: E2E Large Plan
+
+on:
+  workflow_dispatch:
+    inputs:
+      modules:
+        description: 'Number of module groups to generate'
+        required: false
+        default: '12'
+      resources_per_module:
+        description: 'Distinct resource blocks per module'
+        required: false
+        default: '25'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate large tfplan.json
+        env:
+          MODULES: ${{ github.event.inputs.modules }}
+          RES_PER_MODULE: ${{ github.event.inputs.resources_per_module }}
+        run: |
+          node -e '
+            const M = Number(process.env.MODULES || 12);
+            const R = Number(process.env.RES_PER_MODULE || 25);
+            const rc = [];
+            for (let m = 0; m < M; m++) {
+              const kind = m % 4;
+              for (let r = 0; r < R; r++) {
+                const address = `module.m${m}.aws_thing.n${r}`;
+                const common = { address, module_address: `module.m${m}`, type: "aws_thing", name: `n${r}` };
+                if (kind === 0) rc.push({ ...common, change: { actions: ["delete", "create"] } });
+                else if (kind === 1) rc.push({ ...common, change: { actions: ["delete"] } });
+                else if (kind === 2) rc.push({ ...common, change: { actions: ["create"] } });
+                else rc.push({ ...common, change: { actions: ["update"], before: { size: 1 }, after: { size: 2 } } });
+              }
+            }
+            const plan = { format_version: "1.2", terraform_version: "1.9.0", resource_changes: rc };
+            require("fs").writeFileSync("tfplan.json", JSON.stringify(plan));
+            console.log(`Generated ${rc.length} resources across ${M} module groups`);
+          '
+
+      - name: Run the Action (local reference)
+        id: translate
+        uses: ./
+        with:
+          plan_path: tfplan.json
+          slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          jira_base_url: https://terraform2jira.atlassian.net
+          jira_email: ${{ secrets.JIRA_EMAIL }}
+          jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
+          jira_issue_key: CORE-1
+
+      - name: Show reduced plan (debug)
+        env:
+          REDUCED_PLAN: ${{ steps.translate.outputs.reduced_plan }}
+        run: echo "$REDUCED_PLAN" | jq '.change_summary, (.modules | length)'

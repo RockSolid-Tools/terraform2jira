@@ -389,6 +389,34 @@ test('enrichModules: a module → friendly code (no "module.") + per-resource co
     ]);
 });
 
+test('enrichModules: caps per-module rendered resources with a +N more marker', () => {
+    const analysis = { modules: [{ module: 'module.big', business_impact: 'x', risk: 'y' }] };
+    const payloadModules = [{
+        module: 'module.big',
+        is_module: true,
+        action_breakdown: { replace: 0, delete: 0, create: 50, import: 0, update: 0 },
+        resources: Array.from({ length: 50 }, (_, i) => ({ address: `module.big.aws_thing.n${i}`, instances: 1, action_breakdown: { replace: 0, delete: 0, create: 1, import: 0, update: 0 } })),
+    }];
+    const [mod] = enrichModules(analysis, payloadModules);
+    assert.equal(mod.resources.length, 31);
+    assert.deepEqual(mod.resources[30], { code: '+20 more', meta: 'resource(s) not shown' });
+});
+
+test('enrichModules: total rendered resources are capped across modules (Jira-safe budget)', () => {
+    const mods = Array.from({ length: 8 }, (_, mi) => ({ module: `module.m${mi}`, business_impact: 'x', risk: 'y' }));
+    const payloadModules = mods.map((m, mi) => ({
+        module: m.module,
+        is_module: true,
+        action_breakdown: { replace: 0, delete: 0, create: 0, import: 0, update: 30 },
+        resources: Array.from({ length: 30 }, (_, i) => ({ address: `module.m${mi}.aws_thing.n${i}`, instances: 1, action_breakdown: { replace: 0, delete: 0, create: 0, import: 0, update: 1 } })),
+    }));
+    const enriched = enrichModules({ modules: mods }, payloadModules);
+    const totalShown = enriched.reduce((n, e) => n + e.resources.filter((r) => !String(r.code).startsWith('+')).length, 0);
+    assert.ok(totalShown <= 150, `total shown ${totalShown} should be <= 150`);
+    const minReal = Math.min(...enriched.map((e) => e.resources.filter((r) => !String(r.code).startsWith('+')).length));
+    assert.ok(minReal >= 1, `every module should show some detail (min was ${minReal})`);
+});
+
 test('DLP guard: serialized grouped/collapsed payload never contains before/after values', () => {
     const plan = {
         format_version: '1.2',
