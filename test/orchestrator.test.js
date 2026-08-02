@@ -341,7 +341,7 @@ test('buildCapacityNotice: null when nothing omitted', () => {
     assert.equal(buildCapacityNotice(null), null);
 });
 
-test('enrichModules: a standalone multi-instance block → code + meta header (no subitems)', () => {
+test('enrichModules: a standalone multi-instance block → a single terraform line, no heading', () => {
     const analysis = { modules: [{ module: 'root.swa', business_impact: 'x', risk: 'y' }] };
     const payloadModules = [{
         module: 'root.swa',
@@ -350,12 +350,11 @@ test('enrichModules: a standalone multi-instance block → code + meta header (n
         resources: [{ address: 'azurerm_static_web_app.sites', instances: 3, action_breakdown: { replace: 0, delete: 1, create: 0, update: 2 }, destroyed_instances: ['legacy'] }],
     }];
     const [mod] = enrichModules(analysis, payloadModules);
-    assert.equal(mod.code, 'azurerm_static_web_app.sites');
-    assert.equal(mod.meta, '×3 — 1 destroyed, 2 updated (destroyed: legacy)');
-    assert.deepEqual(mod.resources, []);
+    assert.equal(mod.name, null);
+    assert.deepEqual(mod.tf, ['- azurerm_static_web_app.sites  # ×3 1 destroyed, 2 updated (destroyed: legacy)']);
 });
 
-test('enrichModules: a single-instance block → action verb in meta', () => {
+test('enrichModules: a single-instance create → a "+" terraform line', () => {
     const analysis = { modules: [{ module: 'aws_s3_bucket.logs', business_impact: 'x', risk: 'y' }] };
     const payloadModules = [{
         module: 'aws_s3_bucket.logs',
@@ -364,11 +363,11 @@ test('enrichModules: a single-instance block → action verb in meta', () => {
         resources: [{ address: 'aws_s3_bucket.logs', instances: 1, action_breakdown: { replace: 0, delete: 0, create: 1, update: 0 } }],
     }];
     const [mod] = enrichModules(analysis, payloadModules);
-    assert.equal(mod.code, 'aws_s3_bucket.logs');
-    assert.equal(mod.meta, '(created)');
+    assert.equal(mod.name, null);
+    assert.deepEqual(mod.tf, ['+ aws_s3_bucket.logs']);
 });
 
-test('enrichModules: a single-instance update names the changed attributes in meta', () => {
+test('enrichModules: a single-instance update names the changed attributes as a comment', () => {
     const analysis = { modules: [{ module: 'aws_iam_role.app', business_impact: 'x', risk: 'y' }] };
     const payloadModules = [{
         module: 'aws_iam_role.app',
@@ -377,7 +376,7 @@ test('enrichModules: a single-instance update names the changed attributes in me
         resources: [{ address: 'aws_iam_role.app', instances: 1, action_breakdown: { replace: 0, delete: 0, create: 0, update: 1 }, changed: ['assume_role_policy', 'managed_policy_arns'] }],
     }];
     const [mod] = enrichModules(analysis, payloadModules);
-    assert.equal(mod.meta, '(updated: assume_role_policy, managed_policy_arns)');
+    assert.deepEqual(mod.tf, ['~ aws_iam_role.app  # assume_role_policy, managed_policy_arns']);
 });
 
 test('enrichModules: caps the changed list at 3 attributes with an ellipsis', () => {
@@ -389,10 +388,10 @@ test('enrichModules: caps the changed list at 3 attributes with an ellipsis', ()
         resources: [{ address: 'aws_x.y', instances: 1, action_breakdown: { replace: 0, delete: 0, create: 0, update: 1 }, changed: ['a', 'b', 'c', 'd'] }],
     }];
     const [mod] = enrichModules(analysis, payloadModules);
-    assert.equal(mod.meta, '(updated: a, b, c, …)');
+    assert.deepEqual(mod.tf, ['~ aws_x.y  # a, b, c, …']);
 });
 
-test('enrichModules: a module → friendly code (no "module.") + per-resource code/meta subitems', () => {
+test('enrichModules: a module → full name heading + relative terraform lines', () => {
     const analysis = { modules: [{ module: 'module.cosmos_db', business_impact: 'x', risk: 'y' }] };
     const payloadModules = [{
         module: 'module.cosmos_db',
@@ -404,12 +403,8 @@ test('enrichModules: a module → friendly code (no "module.") + per-resource co
         ],
     }];
     const [mod] = enrichModules(analysis, payloadModules);
-    assert.equal(mod.code, 'cosmos_db');
-    assert.equal(mod.meta, '— 2 created');
-    assert.deepEqual(mod.resources, [
-        { code: 'module.cosmos_db.azurerm_cosmosdb_account.this', meta: '(created)' },
-        { code: 'module.cosmos_db.azurerm_private_endpoint.pe', meta: '(created)' },
-    ]);
+    assert.equal(mod.name, 'module.cosmos_db');
+    assert.deepEqual(mod.tf, ['+ azurerm_cosmosdb_account.this', '+ azurerm_private_endpoint.pe']);
 });
 
 test('enrichModules: caps per-module rendered resources with a +N more marker', () => {
@@ -421,8 +416,8 @@ test('enrichModules: caps per-module rendered resources with a +N more marker', 
         resources: Array.from({ length: 50 }, (_, i) => ({ address: `module.big.aws_thing.n${i}`, instances: 1, action_breakdown: { replace: 0, delete: 0, create: 1, import: 0, update: 0 } })),
     }];
     const [mod] = enrichModules(analysis, payloadModules);
-    assert.equal(mod.resources.length, 31);
-    assert.deepEqual(mod.resources[30], { code: '+20 more', meta: 'resource(s) not shown' });
+    assert.equal(mod.tf.length, 31);
+    assert.equal(mod.tf[30], '# +20 more');
 });
 
 test('enrichModules: total rendered resources are capped across modules (Jira-safe budget)', () => {
@@ -434,9 +429,9 @@ test('enrichModules: total rendered resources are capped across modules (Jira-sa
         resources: Array.from({ length: 30 }, (_, i) => ({ address: `module.m${mi}.aws_thing.n${i}`, instances: 1, action_breakdown: { replace: 0, delete: 0, create: 0, import: 0, update: 1 } })),
     }));
     const enriched = enrichModules({ modules: mods }, payloadModules);
-    const totalShown = enriched.reduce((n, e) => n + e.resources.filter((r) => !String(r.code).startsWith('+')).length, 0);
+    const totalShown = enriched.reduce((n, e) => n + e.tf.filter((l) => !l.startsWith('#')).length, 0);
     assert.ok(totalShown <= 150, `total shown ${totalShown} should be <= 150`);
-    const minReal = Math.min(...enriched.map((e) => e.resources.filter((r) => !String(r.code).startsWith('+')).length));
+    const minReal = Math.min(...enriched.map((e) => e.tf.filter((l) => !l.startsWith('#')).length));
     assert.ok(minReal >= 1, `every module should show some detail (min was ${minReal})`);
 });
 
@@ -666,7 +661,7 @@ test('overviewLine: imported ranks between created and updated', () => {
     assert.equal(overviewLine(modules), '1 created \u00b7 2 imported \u00b7 3 updated');
 });
 
-test('enrichModules: a single import block → (imported) meta', () => {
+test('enrichModules: a single import block → a "→" terraform line', () => {
     const analysis = { modules: [{ module: 'aws_s3_bucket.adopted', business_impact: 'x', risk: 'y' }] };
     const payloadModules = [{
         module: 'aws_s3_bucket.adopted',
@@ -675,7 +670,7 @@ test('enrichModules: a single import block → (imported) meta', () => {
         resources: [{ address: 'aws_s3_bucket.adopted', instances: 1, action_breakdown: { replace: 0, delete: 0, create: 0, import: 1, update: 0 } }],
     }];
     const [mod] = enrichModules(analysis, payloadModules);
-    assert.equal(mod.meta, '(imported)');
+    assert.deepEqual(mod.tf, ['→ aws_s3_bucket.adopted']);
 });
 
 // --- Backend error handling / retry ----------------------------------------

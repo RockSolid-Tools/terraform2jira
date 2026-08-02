@@ -44,11 +44,12 @@ function buildMarkdown(analysis, context) {
 
     if (Array.isArray(analysis.modules) && analysis.modules.length) {
         lines.push('', '<details>', '<summary>Details — resource changes</summary>', '');
+        if (analysis.tfLegend) lines.push(`_${analysis.tfLegend}_`, '');
         analysis.modules.forEach((mod, i) => {
             if (i > 0) lines.push('', '---');
-            lines.push('', mod.meta ? `**\`${mod.code}\`** ${mod.meta}` : `**\`${mod.code}\`**`);
-            if (mod.business_impact) lines.push(mod.business_impact);
-            (mod.resources || []).forEach((r) => lines.push(`- \`${r.code}\` ${r.meta}`));
+            if (mod.name) lines.push('', `**\`${mod.name}\`**`);
+            if (mod.business_impact) lines.push('', mod.business_impact);
+            if (mod.tf && mod.tf.length) lines.push('```diff', ...mod.tf, '```');
             if (mod.risk) lines.push(`_Risk: ${mod.risk}_`);
         });
         lines.push('', '</details>');
@@ -179,16 +180,17 @@ function buildAdf(analysis, capacityNotice) {
 
     if (Array.isArray(analysis.modules) && analysis.modules.length) {
         const details = [];
+        if (analysis.tfLegend) {
+            details.push(paragraph({ type: 'text', text: analysis.tfLegend, marks: [{ type: 'em' }] }));
+        }
         analysis.modules.forEach((mod, i) => {
             if (i > 0) details.push({ type: 'rule' });
-            const title = [strongNode(mod.code)];
-            if (mod.meta) title.push(textNode(` ${mod.meta}`));
-            details.push(paragraph(title));
+            if (mod.name) details.push(paragraph([strongNode(mod.name)]));
             if (mod.business_impact) {
                 details.push(paragraph(textNode(mod.business_impact)));
             }
-            if (mod.resources.length) {
-                details.push(bulletList(mod.resources.map((r) => textNode(`${r.code} ${r.meta}`))));
+            if (mod.tf && mod.tf.length) {
+                details.push({ type: 'codeBlock', attrs: { language: 'diff' }, content: [textNode(mod.tf.join('\n'))] });
             }
             if (mod.risk) {
                 details.push(paragraph([strongNode('Risk: '), textNode(mod.risk)]));
@@ -673,35 +675,47 @@ function overviewLine(payloadModules) {
     return parts.join(' \u00b7 ');
 }
 
-const ACTION_WORD = { replace: 'recreated', delete: 'destroyed', create: 'created', import: 'imported', update: 'updated' };
+const TF_SYMBOL = { replace: '-/+', delete: '-', create: '+', import: '\u2192', update: '~' };
+const TF_LEGEND = '+ create \u00b7 ~ update \u00b7 - destroy \u00b7 -/+ replace \u00b7 \u2192 import';
 
-function resourceMeta(entry) {
+function resourceSymbol(breakdown) {
+    const b = breakdown || {};
+    if (b.replace) return TF_SYMBOL.replace;
+    if (b.delete) return TF_SYMBOL.delete;
+    if (b.create) return TF_SYMBOL.create;
+    if (b.import) return TF_SYMBOL.import;
+    return TF_SYMBOL.update;
+}
+
+// The "# ..." trailer of a terraform-style line: changed attr names, or the instance breakdown.
+function tfComment(entry) {
     const bd = entry.action_breakdown || {};
     const instances = entry.instances || 1;
     const changed = Array.isArray(entry.changed) ? entry.changed : [];
     const changedText = changed.length
         ? `${changed.slice(0, 3).join(', ')}${changed.length > 3 ? ', \u2026' : ''}`
         : '';
-
     if (instances > 1) {
         const notable = [];
-        if (entry.recreated_instances && entry.recreated_instances.length) {
-            notable.push(`recreated: ${entry.recreated_instances.join(', ')}`);
-        }
-        if (entry.destroyed_instances && entry.destroyed_instances.length) {
-            notable.push(`destroyed: ${entry.destroyed_instances.join(', ')}`);
-        }
-        if (changedText) {
-            notable.push(`changed: ${changedText}`);
-        }
-        const base = `\u00d7${instances} \u2014 ${breakdownLabel(bd)}`;
+        if (entry.recreated_instances && entry.recreated_instances.length) notable.push(`recreated: ${entry.recreated_instances.join(', ')}`);
+        if (entry.destroyed_instances && entry.destroyed_instances.length) notable.push(`destroyed: ${entry.destroyed_instances.join(', ')}`);
+        if (changedText) notable.push(changedText);
+        const base = `\u00d7${instances} ${breakdownLabel(bd)}`;
         return notable.length ? `${base} (${notable.join('; ')})` : base;
     }
-    const action = ['replace', 'delete', 'create', 'import', 'update'].find((k) => bd[k] > 0);
-    if (action === 'update' && changedText) {
-        return `(updated: ${changedText})`;
-    }
-    return `(${ACTION_WORD[action] || 'updated'})`;
+    return changedText;
+}
+
+// Sub-resources read relative to their module heading, like a terraform plan.
+function relativeAddress(address, prefix) {
+    return prefix && address.startsWith(`${prefix}.`) ? address.slice(prefix.length + 1) : address;
+}
+
+function tfLine(entry, prefix) {
+    const symbol = resourceSymbol(entry.action_breakdown);
+    const addr = relativeAddress(entry.address, prefix);
+    const comment = tfComment(entry);
+    return comment ? `${symbol} ${addr}  # ${comment}` : `${symbol} ${addr}`;
 }
 
 // Total detail budget sized to keep the rendered message under Jira's ~32KB limit.
@@ -725,12 +739,10 @@ function allocateRenderBudget(counts, total, perModuleMax) {
     return limits;
 }
 
-function renderResources(resources, limit) {
-    const shown = resources.slice(0, limit).map((r) => ({ code: r.address, meta: resourceMeta(r) }));
+function tfLines(resources, prefix, limit) {
+    const shown = resources.slice(0, limit).map((r) => tfLine(r, prefix));
     const hidden = resources.length - shown.length;
-    if (hidden > 0) {
-        shown.push({ code: `+${hidden} more`, meta: 'resource(s) not shown' });
-    }
+    if (hidden > 0) shown.push(`# +${hidden} more`);
     return shown;
 }
 
@@ -743,18 +755,16 @@ function enrichModules(analysis, payloadModules) {
     return llmModules.map((m, idx) => {
         const data = datas[idx];
         const isModule = Boolean(data.is_module);
-        const first = (data.resources && data.resources[0]) || { address: m.module, action_breakdown: {} };
-        const summary = breakdownLabel(data.action_breakdown);
+        const resources = Array.isArray(data.resources) ? data.resources : [];
         return {
             module: m.module,
             is_module: isModule,
             business_impact: m.business_impact,
             risk: m.risk,
-            code: isModule
-                ? (m.module.startsWith('module.') ? m.module.slice('module.'.length) : m.module)
-                : first.address,
-            meta: isModule ? (summary ? `\u2014 ${summary}` : '') : resourceMeta(first),
-            resources: isModule ? renderResources(data.resources || [], limits[idx]) : [],
+            name: isModule ? m.module : null,
+            tf: isModule
+                ? tfLines(resources, m.module, limits[idx])
+                : (resources[0] ? [tfLine(resources[0], null)] : []),
         };
     });
 }
@@ -786,7 +796,7 @@ function buildCapacityNotice(changeSummary) {
 async function distribute(analysis, httpClient, event, changeSummary, payloadModules) {
     const failOnError = core.getInput('fail_on_error', { required: false }) === 'true';
     const capacityNotice = buildCapacityNotice(changeSummary);
-    const analysisView = { ...analysis, modules: enrichModules(analysis, payloadModules), overview: overviewLine(payloadModules) };
+    const analysisView = { ...analysis, modules: enrichModules(analysis, payloadModules), overview: overviewLine(payloadModules), tfLegend: TF_LEGEND };
 
     const jiraCfg = {
         baseUrl: core.getInput('jira_base_url', { required: false }),
@@ -960,14 +970,15 @@ function buildBlocks(analysis, context) {
     if (Array.isArray(analysis.modules) && analysis.modules.length) {
         blocks.push({ type: 'divider' });
         blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '*Details — resource changes*' }] });
+        if (analysis.tfLegend) {
+            blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: analysis.tfLegend }] });
+        }
         analysis.modules.forEach((mod, i) => {
             if (i > 0) blocks.push({ type: 'divider' });
-            const lines = [mod.meta ? `*\`${mod.code}\`* ${mod.meta}` : `*\`${mod.code}\`*`];
+            const lines = [];
+            if (mod.name) lines.push(`*\`${mod.name}\`*`);
             if (mod.business_impact) lines.push(mod.business_impact);
-            const resList = (mod.resources || [])
-                .map((r) => `• \`${r.code}\` ${r.meta}`)
-                .join('\n');
-            if (resList) lines.push(resList);
+            if (mod.tf && mod.tf.length) lines.push('```\n' + mod.tf.join('\n') + '\n```');
             if (mod.risk) lines.push(`*Risk:* ${mod.risk}`);
             blocks.push(section(lines.join('\n')));
         });
